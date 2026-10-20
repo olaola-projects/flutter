@@ -1033,6 +1033,9 @@ class MultiFrameImageStreamCompleter extends ImageStreamCompleter {
       return;
     }
     assert(_nextFrame != null);
+    if (_nextFrame == null) {
+      return;
+    }
     if (_isFirstFrame() || _hasFrameDurationPassed(timestamp)) {
       _emitFrame(
         ImageInfo(image: _nextFrame!.image.clone(), scale: _scale, debugLabel: debugLabel),
