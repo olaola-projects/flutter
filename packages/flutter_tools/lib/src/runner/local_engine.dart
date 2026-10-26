@@ -25,16 +25,12 @@ import '../dart/package_map.dart';
 /// For more information on local engines, see README.md.
 class LocalEngineLocator {
   LocalEngineLocator({
-    required Platform platform,
-    required Logger logger,
-    required FileSystem fileSystem,
-    required String flutterRoot,
-    required UserMessages userMessages,
-  }) : _platform = platform,
-       _logger = logger,
-       _fileSystem = fileSystem,
-       _flutterRoot = flutterRoot,
-       _userMessages = userMessages;
+    required this._platform,
+    required this._logger,
+    required this._fileSystem,
+    required this._flutterRoot,
+    required this._userMessages,
+  });
 
   final Platform _platform;
   final Logger _logger;
@@ -56,9 +52,14 @@ class LocalEngineLocator {
       'See https://github.com/flutter/flutter/issues/132245 for details.';
 
   String _runnerNoEngineBuildDirInPath(String engineSourcePath) =>
-      'Unable to detect a Flutter engine build directory in $engineSourcePath.\n'
-      "Please ensure that $engineSourcePath is a Flutter engine 'src' directory and that "
-      "you have compiled the engine in that directory, which should produce an 'out' directory";
+      'No Flutter engine build directory found at: $engineSourcePath.\n'
+      '\n'
+      'To fix this:\n'
+      "1. Ensure '$engineSourcePath' is a valid Flutter engine 'src' directory.\n"
+      "2. Verify the engine is compiled in that directory, which should produce an 'out' directory.\n"
+      '\n'
+      'Alternatively, specify a different engine source path using the '
+      '--local-engine-src-path flag or the FLUTTER_ENGINE environment variable.';
 
   String get _runnerLocalEngineOrWebSdkRequired =>
       'You must specify --local-engine or --local-web-sdk if you are using a locally built engine or web sdk.';

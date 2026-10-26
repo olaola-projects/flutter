@@ -3,13 +3,15 @@
 // found in the LICENSE file.
 
 import 'package:file/memory.dart';
+import 'package:flutter_tools/src/artifacts.dart';
 import 'package:flutter_tools/src/base/logger.dart';
+import 'package:flutter_tools/src/base/platform.dart';
 import 'package:flutter_tools/src/build_info.dart';
 import 'package:flutter_tools/src/build_system/build_system.dart';
 import 'package:flutter_tools/src/build_system/targets/web.dart';
 import 'package:flutter_tools/src/dart/pub.dart';
+import 'package:flutter_tools/src/isolated/build_targets.dart';
 import 'package:flutter_tools/src/project.dart';
-import 'package:flutter_tools/src/reporting/reporting.dart';
 import 'package:flutter_tools/src/web/compile.dart';
 import 'package:flutter_tools/src/web/file_generators/flutter_service_worker_js.dart';
 import 'package:unified_analytics/unified_analytics.dart';
@@ -23,7 +25,6 @@ import '../../src/throwing_pub.dart';
 
 void main() {
   late MemoryFileSystem fileSystem;
-  late TestUsage testUsage;
   late FakeAnalytics fakeAnalytics;
   late BufferLogger logger;
   late FakeFlutterVersion flutterVersion;
@@ -31,7 +32,6 @@ void main() {
 
   setUp(() {
     fileSystem = MemoryFileSystem.test();
-    testUsage = TestUsage();
     logger = BufferLogger.test();
     flutterVersion = FakeFlutterVersion(frameworkVersion: '1.0.0', engineRevision: '9.8.7');
     fakeAnalytics = getInitializedFakeAnalyticsInstance(
@@ -73,12 +73,20 @@ environement:
       });
 
       final webBuilder = WebBuilder(
-        logger: logger,
-        processManager: FakeProcessManager.any(),
-        buildSystem: buildSystem,
-        flutterVersion: flutterVersion,
-        fileSystem: fileSystem,
         analytics: fakeAnalytics,
+        buildSystem: buildSystem,
+        buildTargets: const BuildTargetsImpl(),
+        toolContext: FakeToolContext(
+          artifacts: FakeArtifacts(fileSystem: fileSystem),
+          cache: FakeCache(fileSystem: fileSystem),
+          config: FakeConfig(),
+          flutterVersion: flutterVersion,
+          fs: fileSystem,
+          logger: logger,
+          platform: FakePlatform(),
+          processManager: FakeProcessManager.any(),
+          terminal: FakeTerminal(),
+        ),
       );
       await webBuilder.buildWeb(
         flutterProject,
@@ -105,8 +113,7 @@ environement:
           Event.flutterBuildInfo(
             label: 'web-compile',
             buildType: 'web',
-            settings:
-                'dryRun: false; optimizationLevel: 0; web-renderer: skwasm,canvaskit; web-target: wasm,js;',
+            settings: 'dryRun: false; optimizationLevel: 0; web-renderer: skwasm,canvaskit; web-target: wasm,js;',
           ),
         ]),
       );
@@ -141,19 +148,27 @@ environement:
       });
 
       final webBuilder = WebBuilder(
-        logger: logger,
-        processManager: FakeProcessManager.any(),
-        buildSystem: buildSystem,
-        flutterVersion: flutterVersion,
-        fileSystem: fileSystem,
         analytics: fakeAnalytics,
+        buildSystem: buildSystem,
+        buildTargets: const BuildTargetsImpl(),
+        toolContext: FakeToolContext(
+          artifacts: FakeArtifacts(fileSystem: fileSystem),
+          cache: FakeCache(fileSystem: fileSystem),
+          config: FakeConfig(),
+          flutterVersion: flutterVersion,
+          fs: fileSystem,
+          logger: logger,
+          platform: FakePlatform(),
+          processManager: FakeProcessManager.any(),
+          terminal: FakeTerminal(),
+        ),
       );
       await webBuilder.buildWeb(
         flutterProject,
         'target',
         BuildInfo.debug,
         ServiceWorkerStrategy.offlineFirst,
-        compilerConfigs: <WebCompilerConfig>[],
+        compilerConfigs: const <WebCompilerConfig>[],
       );
 
       expect(logger.statusText, contains('Compiling target for the Web...'));
@@ -186,19 +201,27 @@ environement:
       });
 
       final webBuilder = WebBuilder(
-        logger: logger,
-        processManager: FakeProcessManager.any(),
-        buildSystem: buildSystem,
-        flutterVersion: flutterVersion,
-        fileSystem: fileSystem,
         analytics: fakeAnalytics,
+        buildSystem: buildSystem,
+        buildTargets: const BuildTargetsImpl(),
+        toolContext: FakeToolContext(
+          artifacts: FakeArtifacts(fileSystem: fileSystem),
+          cache: FakeCache(fileSystem: fileSystem),
+          config: FakeConfig(),
+          flutterVersion: flutterVersion,
+          fs: fileSystem,
+          logger: logger,
+          platform: FakePlatform(),
+          processManager: FakeProcessManager.any(),
+          terminal: FakeTerminal(),
+        ),
       );
       await webBuilder.buildWeb(
         flutterProject,
         'target',
         BuildInfo.debug,
-        null, // serviceWorkerStrategy is omitted
-        compilerConfigs: <WebCompilerConfig>[],
+        null,
+        compilerConfigs: const <WebCompilerConfig>[],
       );
 
       expect(logger.statusText, contains('Compiling target for the Web...'));
@@ -228,12 +251,20 @@ environement:
       );
 
       final webBuilder = WebBuilder(
-        logger: logger,
-        processManager: FakeProcessManager.any(),
-        buildSystem: buildSystem,
-        flutterVersion: flutterVersion,
-        fileSystem: fileSystem,
         analytics: fakeAnalytics,
+        buildSystem: buildSystem,
+        buildTargets: const BuildTargetsImpl(),
+        toolContext: FakeToolContext(
+          artifacts: FakeArtifacts(fileSystem: fileSystem),
+          cache: FakeCache(fileSystem: fileSystem),
+          config: FakeConfig(),
+          flutterVersion: flutterVersion,
+          fs: fileSystem,
+          logger: logger,
+          platform: FakePlatform(),
+          processManager: FakeProcessManager.any(),
+          terminal: FakeTerminal(),
+        ),
       );
       await expectLater(
         () async => webBuilder.buildWeb(
@@ -255,7 +286,6 @@ environement:
         logger.errorText,
         contains('Target hello failed: FormatException: illegal character in input string'),
       );
-      expect(testUsage.timings, isEmpty);
       expect(fakeAnalytics.sentEvents, isEmpty);
     },
     overrides: <Type, Generator>{
@@ -263,6 +293,90 @@ environement:
       Pub: ThrowingPub.new,
     },
   );
+
+  for (final deprecatedJsInterop in <bool>[true, false]) {
+    testUsingContext(
+      'WebBuilder includes deprecatedJsInterop=$deprecatedJsInterop in buildEventAnalyticsValues on success and failure',
+      () async {
+        final buildSystem = TestBuildSystem.list(<BuildResult>[
+          BuildResult(success: true),
+          BuildResult(
+            success: false,
+            exceptions: <String, ExceptionMeasurement>{
+              'dart2js': ExceptionMeasurement(
+                'dart2js',
+                const FormatException('disallowed legacy web import'),
+                StackTrace.current,
+              ),
+            },
+          ),
+        ]);
+
+        final webBuilder = WebBuilder(
+          analytics: fakeAnalytics,
+          buildSystem: buildSystem,
+          buildTargets: const BuildTargetsImpl(),
+          toolContext: FakeToolContext(
+            artifacts: FakeArtifacts(fileSystem: fileSystem),
+            cache: FakeCache(fileSystem: fileSystem),
+            config: FakeConfig(),
+            flutterVersion: flutterVersion,
+            fs: fileSystem,
+            logger: logger,
+            platform: FakePlatform(),
+            processManager: FakeProcessManager.any(),
+            terminal: FakeTerminal(),
+          ),
+        );
+        final compilerConfigs = <WebCompilerConfig>[
+          const WasmCompilerConfig(optimizationLevel: 4, dryRun: true),
+          JsCompilerConfig(optimizationLevel: 4, deprecatedJsInterop: deprecatedJsInterop),
+        ];
+
+        await webBuilder.buildWeb(
+          flutterProject,
+          'target',
+          BuildInfo.release,
+          null,
+          compilerConfigs: compilerConfigs,
+        );
+
+        await expectLater(
+          () async => webBuilder.buildWeb(
+            flutterProject,
+            'target',
+            BuildInfo.release,
+            null,
+            compilerConfigs: compilerConfigs,
+          ),
+          throwsToolExit(message: 'Failed to compile application for the Web.'),
+        );
+
+        expect(
+          fakeAnalytics.sentEvents,
+          containsAll(<Event>[
+            Event.flutterBuildInfo(
+              label: 'web-compile',
+              buildType: 'web',
+              settings:
+                  'deprecatedJsInterop: $deprecatedJsInterop; dryRun: true; web-renderer: skwasm,canvaskit; web-target: wasm,js;',
+            ),
+            Event.flutterBuildInfo(
+              label: 'web-compile',
+              buildType: 'web',
+              settings:
+                  'deprecatedJsInterop: $deprecatedJsInterop; dryRun: true; web-renderer: skwasm,canvaskit; web-target: wasm,js;',
+              error: 'dart2js-failure',
+            ),
+          ]),
+        );
+      },
+      overrides: <Type, Generator>{
+        ProcessManager: () => FakeProcessManager.any(),
+        Pub: ThrowingPub.new,
+      },
+    );
+  }
 
   Future<void> testRendererModeFromDartDefines(WebRendererMode webRenderer) async {
     testUsingContext(
@@ -286,6 +400,58 @@ environement:
 
       computed = WebRendererMode.fromDartDefines(<String>{}, useWasm: true);
       expect(computed, WebRendererMode.getDefault(useWasm: true));
+    },
+  );
+
+  testUsingContext(
+    'WebBuilder passes flutterVersion.engineRevision to WebServiceWorker on local engine builds',
+    () async {
+      final buildSystem = TestBuildSystem.all(BuildResult(success: true), (
+        Target target,
+        Environment environment,
+      ) {
+        expect(environment.engineVersion, isNull);
+        expect(
+          target,
+          isA<WebServiceWorker>().having(
+            (WebServiceWorker t) => t.engineRevision,
+            'engineRevision',
+            '9.8.7',
+          ),
+        );
+      });
+
+      final webBuilder = WebBuilder(
+        analytics: fakeAnalytics,
+        buildSystem: buildSystem,
+        buildTargets: const BuildTargetsImpl(),
+        toolContext: FakeToolContext(
+          artifacts: Artifacts.testLocalEngine(
+            localEngine: 'out/host_debug_unopt',
+            localEngineHost: 'out/host_debug_unopt',
+            fileSystem: fileSystem,
+          ),
+          cache: FakeCache(fileSystem: fileSystem),
+          config: FakeConfig(),
+          flutterVersion: flutterVersion,
+          fs: fileSystem,
+          logger: logger,
+          platform: FakePlatform(),
+          processManager: FakeProcessManager.any(),
+          terminal: FakeTerminal(),
+        ),
+      );
+      await webBuilder.buildWeb(
+        flutterProject,
+        'target',
+        BuildInfo.debug,
+        ServiceWorkerStrategy.offlineFirst,
+        compilerConfigs: const <WebCompilerConfig>[],
+      );
+    },
+    overrides: <Type, Generator>{
+      ProcessManager: () => FakeProcessManager.any(),
+      Pub: ThrowingPub.new,
     },
   );
 }

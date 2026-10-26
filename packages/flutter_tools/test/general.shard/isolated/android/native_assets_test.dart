@@ -8,6 +8,7 @@ import 'package:file/memory.dart';
 import 'package:file_testing/file_testing.dart';
 import 'package:flutter_tools/src/android/gradle_utils.dart';
 import 'package:flutter_tools/src/artifacts.dart';
+import 'package:flutter_tools/src/base/config.dart';
 import 'package:flutter_tools/src/base/file_system.dart';
 import 'package:flutter_tools/src/base/logger.dart';
 import 'package:flutter_tools/src/base/platform.dart';
@@ -54,7 +55,11 @@ void main() {
       'build with assets $buildMode',
       // [intended] Backslashes in commands, but we will never run these commands on Windows.
       skip: const LocalPlatform().isWindows,
-      overrides: <Type, Generator>{ProcessManager: () => FakeProcessManager.empty()},
+      overrides: <Type, Generator>{
+        ProcessManager: () => FakeProcessManager.empty(),
+        FeatureFlags: () =>
+            TestFeatureFlags(isNativeAssetsEnabled: true, isDartDataAssetsEnabled: true),
+      },
       () async {
         final File packageConfig = environment.projectDir.childFile(
           '.dart_tool/package_config.json',
@@ -78,8 +83,14 @@ void main() {
         ];
         final buildRunner = FakeFlutterNativeAssetsBuildRunner(
           packagesWithNativeAssetsResult: <String>['bar'],
-          buildResult: FakeFlutterNativeAssetsBuilderResult.fromAssets(codeAssets: codeAssets),
-          linkResult: FakeFlutterNativeAssetsBuilderResult.fromAssets(codeAssets: codeAssets),
+          buildResult: buildMode == BuildMode.debug
+              ? FakeFlutterNativeAssetsBuilderResult.fromAssets(codeAssets: codeAssets)
+              : FakeFlutterNativeAssetsBuilderResult.fromAssets(
+                  codeAssetsForLinking: <String, List<CodeAsset>>{'package:bar': codeAssets},
+                ),
+          linkResult: buildMode == BuildMode.debug
+              ? null
+              : FakeFlutterNativeAssetsBuilderResult.fromAssets(codeAssets: codeAssets),
         );
         final environmentDefines = <String, String>{
           kBuildMode: buildMode.cliName,
@@ -93,6 +104,7 @@ void main() {
           buildRunner: buildRunner,
           buildCodeAssets: const BuildCodeAssetsOptions(appBuildDirectory: null),
           buildDataAssets: true,
+          recordedUsesFile: null,
         );
         await installCodeAssets(
           dartHookResult: result,
@@ -101,13 +113,19 @@ void main() {
           projectUri: projectUri,
           fileSystem: fileSystem,
           nativeAssetsFileUri: nonFlutterTesterAssetUri,
-          targetUri: projectUri.resolve('${getBuildDirectory()}/native_assets/android/'),
+          targetUri: projectUri.resolve(
+            '${getBuildDirectory(Config.test(), fileSystem)}/native_assets/android/',
+          ),
         );
         expect(
           (globals.logger as BufferLogger).traceText,
           stringContainsInOrder(<String>[
-            'Building native assets for android_arm64.',
-            'Building native assets for android_arm64 done.',
+            'Running build hooks for android_arm64.',
+            'Running build hooks for android_arm64 done.',
+            if (buildMode == BuildMode.release) ...<String>[
+              'Running link hooks for android_arm64.',
+              'Running link hooks for android_arm64 done.',
+            ],
           ]),
         );
 
@@ -137,10 +155,11 @@ void main() {
         buildRunner: _BuildRunnerWithoutNdk(),
         buildCodeAssets: const BuildCodeAssetsOptions(appBuildDirectory: null),
         buildDataAssets: true,
+        recordedUsesFile: null,
       );
       expect(
         (globals.logger as BufferLogger).traceText,
-        isNot(contains('Building native assets for ')),
+        isNot(contains('Running build hooks for ')),
       );
     },
   );
@@ -164,6 +183,7 @@ void main() {
           buildRunner: _BuildRunnerWithoutNdk(packagesWithNativeAssetsResult: <String>['bar']),
           buildCodeAssets: const BuildCodeAssetsOptions(appBuildDirectory: null),
           buildDataAssets: true,
+          recordedUsesFile: null,
         ),
         isA<DartHooksResult>(),
       );

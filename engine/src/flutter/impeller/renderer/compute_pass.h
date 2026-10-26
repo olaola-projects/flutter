@@ -5,12 +5,14 @@
 #ifndef FLUTTER_IMPELLER_RENDERER_COMPUTE_PASS_H_
 #define FLUTTER_IMPELLER_RENDERER_COMPUTE_PASS_H_
 
+#include <array>
+#include <cstdint>
 #include <string>
 
-#include "fml/status.h"
 #include "impeller/core/resource_binder.h"
 #include "impeller/renderer/compute_pipeline_descriptor.h"
 #include "impeller/renderer/pipeline_descriptor.h"
+#include "third_party/abseil-cpp/absl/status/status.h"
 
 namespace impeller {
 
@@ -33,7 +35,18 @@ class ComputePass : public ResourceBinder {
   virtual void SetPipeline(
       const std::shared_ptr<Pipeline<ComputePipelineDescriptor>>& pipeline) = 0;
 
-  virtual fml::Status Compute(const ISize& grid_size) = 0;
+  //----------------------------------------------------------------------------
+  /// @brief      Dispatch a grid of compute workgroups.
+  ///
+  ///             The components of `workgroup_count` are workgroup
+  ///             (threadgroup) counts, not invocation counts. The number of
+  ///             invocations per workgroup (the local size) is declared by the
+  ///             shader. The total invocations along an axis is therefore the
+  ///             workgroup count times the shader's local size.
+  ///
+  /// @return     A cancelled status if any dimension is zero.
+  ///
+  virtual absl::Status Compute(std::array<uint32_t, 3> workgroup_count) = 0;
 
   /// @brief Ensures all previously encoded compute command's buffer writes are
   ///        visible to any subsequent compute commands.

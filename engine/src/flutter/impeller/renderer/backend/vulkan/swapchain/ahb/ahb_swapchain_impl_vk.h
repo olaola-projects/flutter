@@ -5,6 +5,7 @@
 #ifndef FLUTTER_IMPELLER_RENDERER_BACKEND_VULKAN_SWAPCHAIN_AHB_AHB_SWAPCHAIN_IMPL_VK_H_
 #define FLUTTER_IMPELLER_RENDERER_BACKEND_VULKAN_SWAPCHAIN_AHB_AHB_SWAPCHAIN_IMPL_VK_H_
 
+#include <cstdint>
 #include <memory>
 
 #include "flutter/fml/closure.h"
@@ -27,6 +28,7 @@ static constexpr const size_t kMaxPendingPresents = 2u;
 
 struct AHBFrameSynchronizerVK {
   vk::UniqueFence acquire;
+  bool acquire_fence_pending = false;
   vk::UniqueSemaphore render_ready = {};
   std::shared_ptr<ExternalSemaphoreVK> present_ready;
   std::shared_ptr<CommandBuffer> final_cmd_buffer;
@@ -125,9 +127,12 @@ class AHBSwapchainImplVK final
   Mutex currently_displayed_texture_mutex_;
   std::shared_ptr<AHBTextureSourceVK> currently_displayed_texture_
       IPLR_GUARDED_BY(currently_displayed_texture_mutex_);
+  uint64_t last_completed_present_id_
+      IPLR_GUARDED_BY(currently_displayed_texture_mutex_) = 0;
 
   std::vector<std::unique_ptr<AHBFrameSynchronizerVK>> frame_data_;
   size_t frame_index_ = 0;
+  uint64_t next_present_id_ = 1;
   CreateTransactionCB cb_;
   bool is_valid_ = false;
 
@@ -154,7 +159,8 @@ class AHBSwapchainImplVK final
 
   void OnTextureUpdatedOnSurfaceControl(
       std::shared_ptr<AHBTextureSourceVK> texture,
-      ASurfaceTransactionStats* stats);
+      ASurfaceTransactionStats* stats,
+      uint64_t present_id);
 };
 
 }  // namespace impeller

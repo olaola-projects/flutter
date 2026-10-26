@@ -327,7 +327,7 @@ class SemanticsNodeUpdate {
     required this.increasedValueAttributes,
     required this.decreasedValue,
     required this.decreasedValueAttributes,
-    this.tooltip,
+    required this.tooltip,
     this.textDirection,
     required this.transform,
     required this.hitTestTransform,
@@ -377,7 +377,7 @@ class SemanticsNodeUpdate {
   final int scrollIndex;
 
   /// See [ui.SemanticsUpdateBuilder.updateNode].
-  final int? traversalParent;
+  final int traversalParent;
 
   /// See [ui.SemanticsUpdateBuilder.updateNode].
   final double scrollPosition;
@@ -425,7 +425,7 @@ class SemanticsNodeUpdate {
   final List<ui.StringAttribute> decreasedValueAttributes;
 
   /// See [ui.SemanticsUpdateBuilder.updateNode].
-  final String? tooltip;
+  final String tooltip;
 
   /// See [ui.SemanticsUpdateBuilder.updateNode].
   final ui.TextDirection? textDirection;
@@ -584,7 +584,7 @@ enum EngineSemanticsRole {
   /// A graphic object that spins to indicate the application is busy.
   loadingSpinner,
 
-  /// A role used when a more specific role cannot be assigend to
+  /// A role used when a more specific role cannot be assigned to
   /// a [SemanticsObject].
   ///
   /// Provides a label or a value.
@@ -618,13 +618,22 @@ enum EngineSemanticsRole {
   /// A region of a web page that contains navigation links.
   navigation,
 
-  /// A section of content sufficiently important but cannot be descrived by one
+  /// A section of content sufficiently important but cannot be described by one
   /// of the other landmark roles, such as main, contentinfo, complementary, or
   /// navigation.
   region,
 
   /// An area that represents a form.
   form,
+
+  /// A graphic object that can be incremented or decremented as a slider.
+  slider,
+
+  /// A widget that allows the user to select one or more items from a list of choices.
+  listBox,
+
+  /// A selectable item in a [listBox].
+  option,
 }
 
 /// Responsible for setting the `role` ARIA attribute, for attaching
@@ -654,7 +663,7 @@ abstract class SemanticRole {
   ///
   /// Use this constructor for highly specialized cases where
   /// [SemanticRole.withBasics] does not work, for example when the default focus
-  /// management intereferes with the widget's functionality.
+  /// management interferes with the widget's functionality.
   SemanticRole.blank(this.kind, this.semanticsObject) {
     element = _initElement(createElement(), semanticsObject);
   }
@@ -893,6 +902,12 @@ abstract class SemanticRole {
   /// the object.
   @mustCallSuper
   void update() {
+    if (semanticsObject.isAccessibilityFocusBlocked && !semanticsObject.hasChildren) {
+      setAttribute('aria-hidden', 'true');
+    } else {
+      removeAttribute('aria-hidden');
+    }
+
     if (semanticsObject.isValidationResultDirty) {
       updateValidationResult();
     }
@@ -963,7 +978,7 @@ abstract class SemanticRole {
     // Set up aria-owns relationship for traversal order.
     if (semanticsObject.traversalParent != -1) {
       final SemanticsObject? parent =
-          semanticsObject.owner._semanticsTree[semanticsObject.traversalParent!];
+          semanticsObject.owner._semanticsTree[semanticsObject.traversalParent];
       if (parent != null && parent.semanticRole != null) {
         final List<String> children = parent.element.getAttribute('aria-owns')?.split(' ') ?? [];
         children.add(getIdAttribute(semanticsObject.id));
@@ -971,10 +986,9 @@ abstract class SemanticRole {
       }
     }
     // Clean up aria-owns relationship.
-    else if (semanticsObject._previousTraversalParent != null &&
-        semanticsObject._previousTraversalParent != -1) {
+    else if (semanticsObject._previousTraversalParent != -1) {
       final SemanticsObject? parent =
-          semanticsObject.owner._semanticsTree[semanticsObject._previousTraversalParent!];
+          semanticsObject.owner._semanticsTree[semanticsObject._previousTraversalParent];
       if (parent != null) {
         final List<String>? children = parent.element.getAttribute('aria-owns')?.split(' ');
         if (children != null) {
@@ -1023,12 +1037,28 @@ abstract class SemanticRole {
   bool get isDisposed => _isDisposed;
   bool _isDisposed = false;
 
+  /// Whether any ancestor of [semanticsObject] has the [EngineSemanticsRole.menu],
+  /// [EngineSemanticsRole.menuBar], or [EngineSemanticsRole.listBox] role.
+  bool get hasMenuOrListBoxAncestor {
+    SemanticsObject? current = semanticsObject.parent;
+    while (current != null) {
+      final EngineSemanticsRole? kind = current.semanticRole?.kind;
+      if (kind == EngineSemanticsRole.menu ||
+          kind == EngineSemanticsRole.menuBar ||
+          kind == EngineSemanticsRole.listBox) {
+        return true;
+      }
+      current = current.parent;
+    }
+    return false;
+  }
+
   /// Called when [semanticsObject] is removed, or when it changes its role such
   /// that this role is no longer relevant.
   ///
   /// This method is expected to remove role-specific functionality from the
   /// DOM. In particular, this method is the appropriate place to call
-  /// [EngineSemanticsOwner.removeGestureModeListener] if this role reponds to
+  /// [EngineSemanticsOwner.removeGestureModeListener] if this role responds to
   /// gesture mode changes.
   @mustCallSuper
   void dispose() {
@@ -1075,12 +1105,33 @@ final class GenericRole extends SemanticRole {
 
   @override
   void update() {
+    if (semanticsObject.isAccessibilityFocusBlocked) {
+      if (semanticsObject.hasChildren) {
+        setAriaRole('none');
+      } else {
+        removeAttribute('role');
+      }
+      super.update();
+      return;
+    }
+
     if (!semanticsObject.hasLabel) {
       // The node didn't get a more specific role, and it has no label. It is
       // likely that this node is simply there for positioning its children and
-      // has no other role for the screen reader to be aware of. In this case,
-      // the element does not need a `role` attribute at all.
+      // has no other role for the screen reader to be aware of. Normally the
+      // element does not need a `role` attribute at all, except when nested
+      // inside a menu, menubar, or listbox (such as the outer ListView
+      // semantics node in DropdownButton or an Autocomplete options list),
+      // where omitting `role="none"` causes the browser to expose the element
+      // as an extra generic child of the container.
       super.update();
+      semanticsObject.owner.addOneTimePostUpdateCallback(() {
+        if (!semanticsObject.hasLabel && !semanticsObject.isTappable && hasMenuOrListBoxAncestor) {
+          setAriaRole('none');
+        } else {
+          removeAttribute('role');
+        }
+      });
       return;
     }
 
@@ -1093,6 +1144,7 @@ final class GenericRole extends SemanticRole {
     //   In HTML text has no ARIA role. It's just a DOM node with text inside
     //   it. Previously, role="text" was used, but it was only supported by
     //   Safari, and it was removed starting Safari 17.
+
     if (semanticsObject.hasChildren) {
       labelAndValue!.preferredRepresentation = LabelRepresentation.ariaLabel;
       setAriaRole('group');
@@ -1108,6 +1160,9 @@ final class GenericRole extends SemanticRole {
 
   @override
   bool focusAsRouteDefault() {
+    if (semanticsObject.isAccessibilityFocusBlocked) {
+      return false;
+    }
     // Case 1: current node has input focus. Let the input focus system decide
     // default focusability.
     if (semanticsObject.isFocusable) {
@@ -1181,7 +1236,7 @@ abstract class SemanticBehavior {
   ///
   /// This method is expected to remove role-specific functionality from the
   /// DOM. In particular, this method is the appropriate place to call
-  /// [EngineSemanticsOwner.removeGestureModeListener] if this role reponds to
+  /// [EngineSemanticsOwner.removeGestureModeListener] if this role responds to
   /// gesture mode changes.
   @mustCallSuper
   void dispose() {
@@ -1692,9 +1747,9 @@ class SemanticsObject {
   }
 
   /// See [ui.SemanticsUpdateBuilder.updateNode].
-  int? get traversalParent => _traversalParent;
-  int? _traversalParent;
-  int? _previousTraversalParent;
+  int get traversalParent => _traversalParent;
+  int _traversalParent = -1;
+  int _previousTraversalParent = -1;
 
   static const int _traversalParentIndex = 1 << 29;
 
@@ -1736,8 +1791,11 @@ class SemanticsObject {
   /// Whether [actions] contains the given action.
   bool hasAction(ui.SemanticsAction action) => (_actions! & action.index) != 0;
 
+  /// Whether accessibility focus on this node is blocked.
+  bool get isAccessibilityFocusBlocked => flags.isAccessibilityFocusBlocked;
+
   /// Whether this object represents a widget that can receive input focus.
-  bool get isFocusable => flags.isFocused != ui.Tristate.none;
+  bool get isFocusable => flags.isFocused != ui.Tristate.none && !isAccessibilityFocusBlocked;
 
   /// Whether this object currently has input focus.
   ///
@@ -2249,6 +2307,10 @@ class SemanticsObject {
         return EngineSemanticsRole.list;
       case ui.SemanticsRole.listItem:
         return EngineSemanticsRole.listItem;
+      case ui.SemanticsRole.listBox:
+        return EngineSemanticsRole.listBox;
+      case ui.SemanticsRole.option:
+        return EngineSemanticsRole.option;
       case ui.SemanticsRole.complementary:
         return EngineSemanticsRole.complementary;
       case ui.SemanticsRole.contentInfo:
@@ -2265,6 +2327,8 @@ class SemanticsObject {
         return EngineSemanticsRole.loadingSpinner;
       case ui.SemanticsRole.progressBar:
         return EngineSemanticsRole.progressBar;
+      case ui.SemanticsRole.slider:
+        return EngineSemanticsRole.slider;
       // TODO(chunhtai): implement these roles.
       // https://github.com/flutter/flutter/issues/159741.
       case ui.SemanticsRole.dragHandle:
@@ -2309,6 +2373,7 @@ class SemanticsObject {
     return switch (role) {
       EngineSemanticsRole.textField => SemanticTextField(this),
       EngineSemanticsRole.scrollable => SemanticScrollable(this),
+      EngineSemanticsRole.slider => SemanticIncrementable(this, EngineSemanticsRole.slider),
       EngineSemanticsRole.incrementable => SemanticIncrementable(this),
       EngineSemanticsRole.button => SemanticButton(this),
       EngineSemanticsRole.radioGroup => SemanticRadioGroup(this),
@@ -2319,6 +2384,8 @@ class SemanticsObject {
       EngineSemanticsRole.link => SemanticLink(this),
       EngineSemanticsRole.list => SemanticList(this),
       EngineSemanticsRole.listItem => SemanticListItem(this),
+      EngineSemanticsRole.listBox => SemanticListBox(this),
+      EngineSemanticsRole.option => SemanticOption(this),
       EngineSemanticsRole.heading => SemanticHeading(this),
       EngineSemanticsRole.header => SemanticHeader(this),
       EngineSemanticsRole.tab => SemanticTab(this),
@@ -2355,6 +2422,11 @@ class SemanticsObject {
     SemanticRole? currentSemanticRole = semanticRole;
     final EngineSemanticsRole kind = _getEngineSemanticsRole();
     final DomElement? previousElement = semanticRole?.element;
+    final DomElement? previouslyFocusedElement = domDocument.activeElement;
+    final bool hadSubtreeFocus =
+        previouslyFocusedElement != null &&
+        previousElement != null &&
+        previousElement.contains(previouslyFocusedElement);
 
     if (currentSemanticRole != null) {
       if (currentSemanticRole.kind == kind) {
@@ -2385,15 +2457,24 @@ class SemanticsObject {
 
     // Reparent element.
     if (previousElement != element) {
+      final DomElement? parent = previousElement?.parent;
+      if (parent != null) {
+        parent.insertBefore(element, previousElement);
+      }
       if (_currentChildrenInRenderOrder != null) {
         for (final SemanticsObject child in _currentChildrenInRenderOrder!) {
           element.append(child.element);
         }
       }
-      final DomElement? parent = previousElement?.parent;
       if (parent != null) {
-        parent.insertBefore(element, previousElement);
         previousElement!.remove();
+      }
+      if (hadSubtreeFocus && domDocument.activeElement != previouslyFocusedElement) {
+        if (element.contains(previouslyFocusedElement)) {
+          previouslyFocusedElement.focusWithoutScroll();
+        } else {
+          element.focusWithoutScroll();
+        }
       }
     }
   }
@@ -2443,7 +2524,7 @@ class SemanticsObject {
   /// mapped onto the [Selectable] behavior.
   ///
   /// [Selectable] and [SemanticCheckable] are not used together on the same
-  /// node. [SemanticCheckable] has precendence over [Selectable].
+  /// node. [SemanticCheckable] has precedence over [Selectable].
   ///
   /// See also:
   ///
@@ -2878,7 +2959,7 @@ class EngineSemantics {
         return;
       } else {
         // Running a real app. Auto-enable engine semantics.
-        semanticsHelper.dispose(); // placeholder no longer needed
+        semanticsHelper.retirePlaceholders(); // placeholder no longer needed
         semanticsEnabled = true;
       }
     }
@@ -3376,7 +3457,7 @@ AFTER: $description
   /// resources.
   ///
   /// The object remains usable after this operation, but because the previous
-  /// semantics tree is completely removed, partial udpates will not succeed as
+  /// semantics tree is completely removed, partial updates will not succeed as
   /// they rely on the prior state of the tree. There is no distinction between
   /// a full update and partial update, so the failure may be cryptic.
   void reset() {

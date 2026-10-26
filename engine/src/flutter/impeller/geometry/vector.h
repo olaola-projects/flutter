@@ -17,6 +17,9 @@ namespace impeller {
 
 // NOLINTBEGIN(google-explicit-constructor)
 
+// cppcoreguidelines-pro-type-member-init doesn't understand that the
+// anonymous struct and `e` share storage in the union below.
+// NOLINTBEGIN(cppcoreguidelines-pro-type-member-init)
 struct Vector3 {
   union {
     struct {
@@ -199,9 +202,8 @@ struct Vector3 {
         aScale * a.z + bScale * b.z,  //
     };
   }
-
-  std::string ToString() const;
 };
+// NOLINTEND(cppcoreguidelines-pro-type-member-init)
 
 // RHS algebraic operations with arithmetic types.
 
@@ -229,6 +231,9 @@ constexpr Vector3 operator/(U s, const Vector3& p) {
   };
 }
 
+// cppcoreguidelines-pro-type-member-init doesn't understand that the
+// anonymous struct and `e` share storage in the union below.
+// NOLINTBEGIN(cppcoreguidelines-pro-type-member-init)
 struct Vector4 {
   union {
     struct {
@@ -316,9 +321,8 @@ struct Vector4 {
   }
 
   constexpr Vector2 xy() const { return Vector2(x, y); }
-
-  std::string ToString() const;
 };
+// NOLINTEND(cppcoreguidelines-pro-type-member-init)
 
 static_assert(sizeof(Vector3) == 3 * sizeof(Scalar));
 static_assert(sizeof(Vector4) == 4 * sizeof(Scalar));

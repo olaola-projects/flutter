@@ -146,7 +146,7 @@ class NetworkImage extends image_provider.ImageProvider<image_provider.NetworkIm
         throw Exception('NetworkImage is an empty file: $resolved');
       }
 
-      return decode(await ui.ImmutableBuffer.fromUint8List(bytes));
+      return await decode(await ui.ImmutableBuffer.fromUint8List(bytes));
     } catch (e) {
       // Depending on where the exception was thrown, the image cache may not
       // have had a chance to track the key in the cache at all.
@@ -156,17 +156,18 @@ class NetworkImage extends image_provider.ImageProvider<image_provider.NetworkIm
       });
       rethrow;
     } finally {
-      // ignore: unawaited_futures
-      chunkEvents.close().catchError((Object error, StackTrace stack) {
-        FlutterError.reportError(
-          FlutterErrorDetails(
-            exception: error,
-            stack: stack,
-            library: 'painting library',
-            context: ErrorDescription('while closing chunkEvents stream in NetworkImage.load'),
-          ),
-        );
-      });
+      unawaited(
+        chunkEvents.close().catchError((Object error, StackTrace stack) {
+          FlutterError.reportError(
+            FlutterErrorDetails(
+              exception: error,
+              stack: stack,
+              library: 'painting library',
+              context: ErrorDescription('while closing chunkEvents stream in NetworkImage.load'),
+            ),
+          );
+        }),
+      );
     }
   }
 

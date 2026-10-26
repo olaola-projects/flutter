@@ -9,16 +9,20 @@ import 'package:process/process.dart';
 import 'package:unified_analytics/unified_analytics.dart';
 
 import '../artifacts.dart';
+import '../base/config.dart';
 import '../base/file_system.dart';
 import '../base/fingerprint.dart';
 import '../base/io.dart';
 import '../base/logger.dart';
+import '../base/os.dart';
+import '../base/platform.dart';
 import '../base/process.dart';
 import '../base/project_migrator.dart';
 import '../base/utils.dart';
 import '../base/version.dart';
 import '../build_info.dart';
 import '../cache.dart';
+import '../context/tool_context.dart';
 import '../darwin/darwin.dart';
 import '../device.dart';
 import '../features.dart';
@@ -73,15 +77,12 @@ For more information, please visit:
 
 class IMobileDevice {
   IMobileDevice({
-    required Artifacts artifacts,
+    required this._artifacts,
     required Cache cache,
     required ProcessManager processManager,
     required Logger logger,
-  }) : _idevicesyslogPath = artifacts.getHostArtifact(HostArtifact.idevicesyslog).path,
-       _idevicescreenshotPath = artifacts.getHostArtifact(HostArtifact.idevicescreenshot).path,
-       _dyLdLibEntry = cache.dyLdLibEntry,
-       _processUtils = ProcessUtils(logger: logger, processManager: processManager),
-       _processManager = processManager;
+  }) : _dyLdLibEntry = cache.dyLdLibEntry,
+       _processUtils = ProcessUtils(logger: logger, processManager: processManager);
 
   /// Create an [IMobileDevice] for testing.
   factory IMobileDevice.test({required ProcessManager processManager}) {
@@ -94,13 +95,11 @@ class IMobileDevice {
     );
   }
 
-  final String _idevicesyslogPath;
-  final String _idevicescreenshotPath;
+  final Artifacts _artifacts;
   final MapEntry<String, String> _dyLdLibEntry;
-  final ProcessManager _processManager;
   final ProcessUtils _processUtils;
 
-  late final bool isInstalled = _processManager.canRun(_idevicescreenshotPath);
+  String get _idevicesyslogPath => _artifacts.getHostArtifact(HostArtifact.idevicesyslog).path;
 
   /// Starts `idevicesyslog` and returns the running process.
   Future<Process> startLogger(String deviceID, bool isWirelesslyConnected) {
@@ -111,25 +110,6 @@ class IMobileDevice {
       if (isWirelesslyConnected) '--network',
     ], environment: Map<String, String>.fromEntries(<MapEntry<String, String>>[_dyLdLibEntry]));
   }
-
-  /// Captures a screenshot to the specified outputFile.
-  Future<void> takeScreenshot(
-    File outputFile,
-    String deviceID,
-    DeviceConnectionInterface interfaceType,
-  ) {
-    return _processUtils.run(
-      <String>[
-        _idevicescreenshotPath,
-        outputFile.path,
-        '--udid',
-        deviceID,
-        if (interfaceType == DeviceConnectionInterface.wireless) '--network',
-      ],
-      throwOnError: true,
-      environment: Map<String, String>.fromEntries(<MapEntry<String, String>>[_dyLdLibEntry]),
-    );
-  }
 }
 
 Future<XcodeBuildResult> buildXcodeProject({
@@ -137,13 +117,16 @@ Future<XcodeBuildResult> buildXcodeProject({
   required BuildInfo buildInfo,
   String? targetOverride,
   EnvironmentType environmentType = EnvironmentType.physical,
-  DarwinArch? activeArch,
+  CpuArch? activeArch,
   bool codesign = true,
   String? deviceID,
   bool configOnly = false,
   XcodeBuildAction buildAction = XcodeBuildAction.build,
   bool disablePortPublication = false,
+  required ToolContext toolContext,
 }) async {
+  final ToolContext(:Config config, :FileSystem fs, :OperatingSystemUtils os, :Platform platform) =
+      toolContext;
   if (!upgradePbxProjWithFlutterAssets(app.project, globals.logger)) {
     return XcodeBuildResult(success: false);
   }
@@ -171,6 +154,11 @@ Future<XcodeBuildResult> buildXcodeProject({
       fileSystem: globals.fs,
       plistParser: globals.plistParser,
       config: globals.config,
+      analytics: globals.analytics,
+      hostPlatform: globals.platform,
+      operatingSystemUtils: globals.os,
+      flutterVersion: globals.flutterVersion,
+      reportCrashes: !await globals.isRunningOnBot,
     ),
     SwiftPackageManagerGitignoreMigration(project, globals.logger),
     MetalAPIValidationMigrator.ios(app.project, globals.logger),
@@ -197,10 +185,24 @@ Future<XcodeBuildResult> buildXcodeProject({
     return XcodeBuildResult(success: false);
   }
 
-  await removeExtendedAttributes(
-    app.project.parent.directory,
-    globals.processUtils,
-    globals.logger,
+  await DarwinDependencyManagement.validatePluginSupport(
+    platform: darwinPlatform,
+    xcodeProject: project.ios,
+    plugins: await project.ios.getPlugins(),
+    fileSystem: globals.fs,
+    logger: globals.logger,
+    cocoapods: globals.cocoaPods,
+    analytics: globals.analytics,
+    featureFlags: featureFlags,
+  );
+
+  await removeExtendedAttributesForProject(
+    xcodeProject: app.project,
+    processUtils: globals.processUtils,
+    logger: globals.logger,
+    fileSystem: globals.fs,
+    config: globals.config,
+    xcodeProjectInterpreter: globals.xcodeProjectInterpreter!,
   );
 
   await DarwinDependencyManagement.validatePluginSupport(
@@ -260,6 +262,18 @@ Future<XcodeBuildResult> buildXcodeProject({
       '4. If you are not using completely custom build configurations, name the newly created configuration ${buildInfo.modeName}.',
     );
     return XcodeBuildResult(success: false);
+  } else if (buildInfo.flavor != null &&
+      !configuration.toLowerCase().contains(buildInfo.flavor!.toLowerCase())) {
+    final String expectedConfiguration = XcodeProjectInfo.expectedBuildConfigurationFor(
+      buildInfo,
+      scheme,
+    );
+    globals.printWarning(
+      'Unable to find "$expectedConfiguration" build configuration for flavor "${buildInfo.flavor}".\n'
+      'Using "$configuration" configuration instead.\n'
+      '  To optionally support custom build settings for this flavor, consider adding the "$expectedConfiguration" build configuration to your Xcode project.\n'
+      '  Visit https://docs.flutter.dev/deployment/flavors-ios for instructions.',
+    );
   }
 
   final FlutterManifest manifest = app.project.parent.manifest;
@@ -283,7 +297,7 @@ Future<XcodeBuildResult> buildXcodeProject({
     );
   }
 
-  final String buildDirectoryPath = getIosBuildDirectory();
+  final String buildDirectoryPath = getIosBuildDirectory(config: config, fileSystem: fs);
 
   final Map<String, String> buildSettings =
       await app.project.buildSettingsForBuildInfo(
@@ -292,6 +306,15 @@ Future<XcodeBuildResult> buildXcodeProject({
         deviceId: deviceID,
       ) ??
       <String, String>{};
+
+  if (buildSettings.isEmpty) {
+    // xcodebuild should have printed possible error messages already, as when
+    // it fails, it returns an empty build settings Map.
+    globals.printError(
+      'No Xcode build settings have been found. Please check possible errors above.',
+    );
+    return XcodeBuildResult(success: false);
+  }
 
   final String? targetBuildDirPath = buildSettings['TARGET_BUILD_DIR'];
   final Directory? targetBuildDir = targetBuildDirPath != null
@@ -303,7 +326,7 @@ Future<XcodeBuildResult> buildXcodeProject({
       .fetchDependenciesAndGenerateXcodebuildArgs(
         app.project,
         globals.fs.directory(buildDirectoryPath),
-        skipPackageUpdatesAndValidation: false,
+        skipPackageValidation: false,
       );
   final buildCommands = <String>[...xcodebuildCommandArgs, '-configuration', configuration];
 
@@ -347,6 +370,7 @@ Future<XcodeBuildResult> buildXcodeProject({
     project: project,
     targetOverride: targetOverride,
     buildInfo: buildInfo,
+    toolContext: toolContext,
     printWarnings: true,
   );
   if (app.project.usesSwiftPackageManager) {
@@ -386,16 +410,17 @@ Future<XcodeBuildResult> buildXcodeProject({
 
   final Directory? workspacePath = app.project.xcodeWorkspace;
   if (workspacePath != null) {
-    buildCommands.addAll(<String>[
-      '-workspace',
-      workspacePath.basename,
-      '-scheme',
-      scheme,
-      if (buildAction !=
-          XcodeBuildAction.archive) // dSYM files aren't copied to the archive if BUILD_DIR is set.
-        'BUILD_DIR=${globals.fs.path.absolute(buildDirectoryPath)}',
-    ]);
+    buildCommands.addAll(<String>['-workspace', workspacePath.basename]);
+  } else {
+    buildCommands.addAll(<String>['-project', app.project.xcodeProject.basename]);
   }
+  buildCommands.addAll(<String>[
+    '-scheme',
+    scheme,
+    if (buildAction !=
+        XcodeBuildAction.archive) // dSYM files aren't copied to the archive if BUILD_DIR is set.
+      'BUILD_DIR=${globals.fs.path.absolute(buildDirectoryPath)}',
+  ]);
 
   // Check if the project contains a watchOS companion app.
   final bool hasWatchCompanion = await app.project.containsWatchCompanion(
@@ -437,10 +462,14 @@ Future<XcodeBuildResult> buildXcodeProject({
     if (!hasWatchCompanion) {
       // ONLY_ACTIVE_ARCH specifies whether the product includes only code for
       // the native architecture.
-      final onlyActiveArch = activeArch == getCurrentDarwinArch();
+      final onlyActiveArch =
+          activeArch ==
+          CpuArch.fromHostPlatform(
+            getCurrentHostPlatform(operatingSystemUtils: os, platform: platform),
+          );
 
       buildCommands.add('ONLY_ACTIVE_ARCH=${onlyActiveArch ? 'YES' : 'NO'}');
-      buildCommands.add('ARCHS=${activeArch.name}');
+      buildCommands.add('ARCHS=${activeArch.darwinArchName}');
     }
   }
 
@@ -738,6 +767,55 @@ bool publicHeadersChanged({
   return headersChanged;
 }
 
+/// Remove extended attributes from all files in the Flutter project, except the Swift package
+/// cache in the build directory.
+///
+/// The Swift package cache is skipped because it makes the command very slow and are not expected to
+/// need to have the attributes removed. See https://github.com/flutter/flutter/issues/183662.
+///
+/// Attributes must be removed from the entire project rather than just the iOS directory due to
+/// user reporting images in the root of their project also need to have the attributes removed.
+/// See https://github.com/flutter/flutter/pull/81435.
+Future<void> removeExtendedAttributesForProject({
+  required XcodeBasedProject xcodeProject,
+  required ProcessUtils processUtils,
+  required Logger logger,
+  required FileSystem fileSystem,
+  required Config config,
+  required XcodeProjectInterpreter xcodeProjectInterpreter,
+}) async {
+  final Directory projectDirectory = xcodeProject.parent.directory;
+  final futures = <Future<void>>[];
+
+  // Remove for all files from the project (except the build directory).
+  final Directory buildDir = fileSystem.directory(getBuildDirectory(config, fileSystem));
+  if (projectDirectory.existsSync()) {
+    for (final FileSystemEntity entity in projectDirectory.listSync()) {
+      if (fileSystem.path.equals(entity.absolute.path, buildDir.absolute.path)) {
+        continue;
+      }
+      futures.add(removeExtendedAttributes(entity, processUtils, logger));
+    }
+  }
+
+  // Remove for all files from the iOS build directory (except the Swift package cache).
+  // We don't remove from other directories in the build directory since they should be unrelated
+  // to the iOS build.
+  final Directory iosBuildDir = fileSystem.directory(
+    getIosBuildDirectory(config: config, fileSystem: fileSystem),
+  );
+  final String swiftPackageCachePath = xcodeProjectInterpreter.swiftPackageCachePath(iosBuildDir);
+  if (iosBuildDir.existsSync()) {
+    for (final FileSystemEntity entity in iosBuildDir.listSync()) {
+      if (fileSystem.path.equals(entity.absolute.path, swiftPackageCachePath)) {
+        continue;
+      }
+      futures.add(removeExtendedAttributes(entity, processUtils, logger));
+    }
+  }
+  await Future.wait(futures);
+}
+
 /// Extended attributes can cause code signing errors. Remove them.
 ///
 /// Attributes like `com.apple.FinderInfo` and `com.apple.provenance` are added
@@ -859,6 +937,7 @@ Future<void> diagnoseXcodeBuildFailure(
     platform: platform,
     logger: logger,
     fileSystem: fileSystem,
+    analytics: analytics,
     device: device,
   );
 
@@ -1034,16 +1113,15 @@ _XCResultIssueHandlingResult _handleXCResultIssue({
       hasProvisioningProfileIssue: false,
       duplicateModule: duplicateModule,
     );
-  } else if (message.toLowerCase().contains('not found')) {
-    final String? missingModule = _parseMissingModule(message);
-    if (missingModule != null) {
-      return _XCResultIssueHandlingResult(
-        requiresProvisioningProfile: false,
-        hasProvisioningProfileIssue: false,
-        missingModule: missingModule,
-      );
-    }
-  } else if (message.toLowerCase().contains('has been modified since')) {
+  } else if (message.toLowerCase().contains('not found') && _parseMissingModule(message) != null) {
+    return _XCResultIssueHandlingResult(
+      requiresProvisioningProfile: false,
+      hasProvisioningProfileIssue: false,
+      missingModule: _parseMissingModule(message),
+    );
+  } else if (message.toLowerCase().contains('has been modified since') ||
+      (message.toLowerCase().contains('module map file') &&
+          message.toLowerCase().contains('not found'))) {
     return _XCResultIssueHandlingResult(
       requiresProvisioningProfile: false,
       hasProvisioningProfileIssue: false,
@@ -1062,6 +1140,15 @@ _XCResultIssueHandlingResult _handleXCResultIssue({
       hasProvisioningProfileIssue: false,
       unableToFindArmDestination: true,
     );
+  } else if (message.contains("deployment target 'IPHONEOS_DEPLOYMENT_TARGET' is set to") &&
+      message.contains('but the range of supported deployment target versions is')) {
+    final String? minVersion = _parseMinDeploymentTarget(message);
+    return _XCResultIssueHandlingResult(
+      requiresProvisioningProfile: false,
+      hasProvisioningProfileIssue: false,
+      iOSMinDeploymentTarget: minVersion,
+      hasIOSMinDeploymentTargetIssue: true,
+    );
   }
   return _XCResultIssueHandlingResult(
     requiresProvisioningProfile: false,
@@ -1077,6 +1164,7 @@ Future<bool> _handleIssues(
   required FlutterDarwinPlatform platform,
   required Logger logger,
   required FileSystem fileSystem,
+  required Analytics analytics,
   Device? device,
 }) async {
   var requiresProvisioningProfile = false;
@@ -1086,7 +1174,9 @@ Future<bool> _handleIssues(
   var issueDetected = false;
   var modifiedPrecompiledSource = false;
   var unableToFindArmDestination = false;
+  var hasIOSMinDeploymentTargetIssue = false;
   String? missingPlatform;
+  String? iOSMinDeploymentTarget;
   final duplicateModules = <String>[];
   final missingModules = <String>[];
 
@@ -1113,6 +1203,12 @@ Future<bool> _handleIssues(
       }
       modifiedPrecompiledSource = handlingResult.modifiedPrecompiledSource;
       unableToFindArmDestination = handlingResult.unableToFindArmDestination;
+      if (handlingResult.iOSMinDeploymentTarget != null) {
+        iOSMinDeploymentTarget = handlingResult.iOSMinDeploymentTarget;
+      }
+      if (handlingResult.hasIOSMinDeploymentTargetIssue) {
+        hasIOSMinDeploymentTargetIssue = true;
+      }
       issueDetected = true;
     }
   } else if (xcResult != null) {
@@ -1131,16 +1227,25 @@ Future<bool> _handleIssues(
     logger.printError(noDevelopmentTeamInstruction, emphasis: true);
   } else if (hasProvisioningProfileIssue) {
     logger.printError('');
+    logger.printError('Error: could not code sign the application.');
+    logger.printError('');
+    logger.printError('To resolve this issue, try the following steps:');
+    logger.printError('  1. Open the project in Xcode:');
+    logger.printError('     open ios/Runner.xcworkspace');
+    logger.printError('  2. In Runner > Signing & Capabilities, verify:');
+    logger.printError('     - Team is set to a valid Apple Developer account');
+    logger.printError('     - Bundle Identifier is correct for your app');
     logger.printError(
-      'It appears that there was a problem signing your application prior to installation on the device.',
+      '     - If Automatically manage signing is enabled, Xcode manages the provisioning profile',
+    );
+    logger.printError(
+      '     - If manual signing is used, the provisioning profile matches the Bundle Identifier',
+    );
+    logger.printError(
+      '  3. In Xcode Settings > Accounts, verify the correct Apple Developer account is added',
     );
     logger.printError('');
-    logger.printError(
-      'Verify that the Bundle Identifier in your project is your signing id in Xcode',
-    );
-    logger.printError('  open ios/Runner.xcworkspace');
-    logger.printError('');
-    logger.printError("Also try selecting 'Product > Build' to fix the problem.");
+    logger.printError('  4. Run Product > Build and fix any code signing issues shown by Xcode.');
   } else if (missingPlatform != null) {
     logger.printError(missingPlatformInstructions(missingPlatform), emphasis: true);
   } else if (swiftPackageManagerMinPlatformMismatchMessage != null) {
@@ -1150,6 +1255,11 @@ Future<bool> _handleIssues(
     final bool usesCocoapods = xcodeProject.podfile.existsSync();
     final bool usesSwiftPackageManager = xcodeProject.usesSwiftPackageManager;
     if (usesCocoapods && usesSwiftPackageManager) {
+      for (final module in duplicateModules) {
+        analytics.send(
+          Event.appleUsageEvent(workflow: 'duplicate-modules-build-failure', parameter: module),
+        );
+      }
       logger.printError(
         'Your project uses both CocoaPods and Swift Package Manager, which can '
         'cause the above error. It may be caused by there being both a CocoaPod '
@@ -1188,7 +1298,7 @@ Future<bool> _handleIssues(
   } else if (modifiedPrecompiledSource) {
     logger.printError(
       '════════════════════════════════════════════════════════════════════════════════\n'
-      'A precompiled file has been changed since last built. Please run "flutter clean" to clear '
+      'A precompiled file has been changed since last built. Please run "flutter clean --include-xcode-workspace" to clear '
       'the cache.\n'
       '════════════════════════════════════════════════════════════════════════════════',
     );
@@ -1207,6 +1317,8 @@ Future<bool> _handleIssues(
         '════════════════════════════════════════════════════════════════════════════════',
       );
     }
+  } else if (hasIOSMinDeploymentTargetIssue) {
+    logger.printError(_iOSDeploymentTargetTooLowMessage(iOSMinDeploymentTarget), emphasis: true);
   }
   return issueDetected;
 }
@@ -1403,6 +1515,26 @@ String? _parseMissingModule(String message) {
   return null;
 }
 
+String? _parseMinDeploymentTarget(String message) {
+  final pattern = RegExp(r'range of supported deployment target versions is ([0-9.]+) to');
+  return pattern.firstMatch(message)?.group(1);
+}
+
+String _iOSDeploymentTargetTooLowMessage(String? minVersion) {
+  final String versionText = minVersion ?? 'the minimum supported version';
+  return '''
+════════════════════════════════════════════════════════════════════════════════
+The iOS deployment target is too low. Xcode requires at least $versionText.
+
+To upgrade your iOS deployment target, follow these steps:
+  1. Open the project in Xcode:
+     open ios/Runner.xcworkspace
+  2. Select the "Runner" project in the project navigator.
+  3. Select the "Runner" TARGET, and in the "General" tab:
+     Update "Minimum Deployments" to at least $versionText.
+════════════════════════════════════════════════════════════════════════════════''';
+}
+
 // The result of [_handleXCResultIssue].
 class _XCResultIssueHandlingResult {
   _XCResultIssueHandlingResult({
@@ -1413,6 +1545,8 @@ class _XCResultIssueHandlingResult {
     this.missingModule,
     this.modifiedPrecompiledSource = false,
     this.unableToFindArmDestination = false,
+    this.iOSMinDeploymentTarget,
+    this.hasIOSMinDeploymentTargetIssue = false,
   });
 
   /// An issue indicates that user didn't provide the provisioning profile.
@@ -1432,10 +1566,14 @@ class _XCResultIssueHandlingResult {
   final String? missingModule;
 
   /// An issue indicates that a source file, such as a header in the Flutter framework, has
-  /// changed since last built. This requires "flutter clean" to resolve.
+  /// changed since last built. This requires "flutter clean --include-xcode-workspace" to resolve.
   final bool modifiedPrecompiledSource;
 
   final bool unableToFindArmDestination;
+
+  final String? iOSMinDeploymentTarget;
+
+  final bool hasIOSMinDeploymentTargetIssue;
 }
 
 const _kResultBundlePath = 'temporary_xcresult_bundle';

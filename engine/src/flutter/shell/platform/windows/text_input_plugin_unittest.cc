@@ -30,6 +30,14 @@ class TextInputPluginModifier {
     text_input_plugin->view_id_ = view_id;
   }
 
+  FlutterViewId GetViewId() { return text_input_plugin->view_id_; }
+
+  bool HasActiveModel() { return text_input_plugin->active_model_ != nullptr; }
+
+  const TextInputModel* GetActiveModel() const {
+    return text_input_plugin->active_model_.get();
+  }
+
  private:
   TextInputPlugin* text_input_plugin;
 
@@ -51,6 +59,7 @@ static constexpr char kChannelName[] = "flutter/textinput";
 static constexpr char kEnableDeltaModel[] = "enableDeltaModel";
 static constexpr char kViewId[] = "viewId";
 static constexpr char kSetClientMethod[] = "TextInput.setClient";
+static constexpr char kSetEditingStateMethod[] = "TextInput.setEditingState";
 static constexpr char kAffinityDownstream[] = "TextAffinity.downstream";
 static constexpr char kTextKey[] = "text";
 static constexpr char kSelectionBaseKey[] = "selectionBase";
@@ -496,6 +505,44 @@ TEST_F(TextInputPluginTest, SetClientRequiresViewIdToBeInteger) {
       "[\"Bad Arguments\",\"Could not set client, view ID is null.\",null]");
 }
 
+TEST_F(TextInputPluginTest, SetEditingStatePreservesComposingRange) {
+  UseEngineWithView();
+
+  TestBinaryMessenger messenger(
+      [](const std::string&, const uint8_t*, size_t, BinaryReply) {});
+  BinaryReply reply_handler = [](const uint8_t*, size_t) {};
+
+  TextInputPlugin handler(&messenger, engine());
+  TextInputPluginModifier modifier(&handler);
+  auto& codec = JsonMethodCodec::GetInstance();
+
+  auto set_client_message = codec.EncodeMethodCall(
+      {kSetClientMethod,
+       EncodedClientConfig("TextInputType.text", "TextInputAction.done")});
+  EXPECT_TRUE(messenger.SimulateEngineMessage(
+      kChannelName, set_client_message->data(), set_client_message->size(),
+      reply_handler));
+  ASSERT_TRUE(modifier.HasActiveModel());
+  handler.ComposeBeginHook();
+
+  auto editing_state =
+      std::make_unique<rapidjson::Document>(rapidjson::kObjectType);
+  auto& allocator = editing_state->GetAllocator();
+  editing_state->AddMember(kTextKey, "abcd", allocator);
+  editing_state->AddMember(kSelectionBaseKey, 2, allocator);
+  editing_state->AddMember(kSelectionExtentKey, 2, allocator);
+  editing_state->AddMember(kComposingBaseKey, 1, allocator);
+  editing_state->AddMember(kComposingExtentKey, 3, allocator);
+  auto set_editing_state_message = codec.EncodeMethodCall(
+      {kSetEditingStateMethod, std::move(editing_state)});
+  EXPECT_TRUE(messenger.SimulateEngineMessage(
+      kChannelName, set_editing_state_message->data(),
+      set_editing_state_message->size(), reply_handler));
+
+  EXPECT_TRUE(modifier.GetActiveModel()->composing());
+  EXPECT_EQ(modifier.GetActiveModel()->composing_range(), TextRange(1, 3));
+}
+
 TEST_F(TextInputPluginTest, TextEditingWorksWithDeltaModel) {
   UseEngineWithView();
 
@@ -775,6 +822,103 @@ TEST_F(TextInputPluginTest, SetAndUseMultipleClients) {
 
   set_client_and_send_message(123, 456);  // Set and send for the first view
   set_client_and_send_message(123, 789);  // Set and send for the next view
+}
+
+// Verify that OnViewRemoved resets active model and view id when the
+// active view is removed.
+TEST_F(TextInputPluginTest, OnViewRemovedResetsActiveView) {
+  UseEngineWithView();
+
+  TestBinaryMessenger messenger([](const std::string& channel,
+                                   const uint8_t* message, size_t message_size,
+                                   BinaryReply reply) {});
+  BinaryReply reply_handler = [](const uint8_t* reply, size_t reply_size) {};
+
+  TextInputPlugin handler(&messenger, engine());
+  TextInputPluginModifier modifier(&handler);
+  modifier.SetViewId(456);
+
+  // Set a client to create an active model.
+  auto& codec = JsonMethodCodec::GetInstance();
+  auto set_client_message = codec.EncodeMethodCall(
+      {"TextInput.setClient",
+       EncodedClientConfig("TextInputType.text", "TextInputAction.done")});
+  messenger.SimulateEngineMessage(kChannelName, set_client_message->data(),
+                                  set_client_message->size(), reply_handler);
+
+  EXPECT_TRUE(modifier.HasActiveModel());
+  EXPECT_EQ(modifier.GetViewId(), 456);
+
+  // Remove the active view.
+  handler.OnViewRemoved(456);
+
+  EXPECT_FALSE(modifier.HasActiveModel());
+  EXPECT_EQ(modifier.GetViewId(), 0);
+}
+
+// Verify that OnViewRemoved does not reset state when a different view
+// is removed.
+TEST_F(TextInputPluginTest, OnViewRemovedIgnoresNonActiveView) {
+  UseEngineWithView();
+
+  TestBinaryMessenger messenger([](const std::string& channel,
+                                   const uint8_t* message, size_t message_size,
+                                   BinaryReply reply) {});
+  BinaryReply reply_handler = [](const uint8_t* reply, size_t reply_size) {};
+
+  TextInputPlugin handler(&messenger, engine());
+  TextInputPluginModifier modifier(&handler);
+  modifier.SetViewId(456);
+
+  // Set a client to create an active model.
+  auto& codec = JsonMethodCodec::GetInstance();
+  auto set_client_message = codec.EncodeMethodCall(
+      {"TextInput.setClient",
+       EncodedClientConfig("TextInputType.text", "TextInputAction.done")});
+  messenger.SimulateEngineMessage(kChannelName, set_client_message->data(),
+                                  set_client_message->size(), reply_handler);
+
+  EXPECT_TRUE(modifier.HasActiveModel());
+  EXPECT_EQ(modifier.GetViewId(), 456);
+
+  // Remove a different view.
+  handler.OnViewRemoved(789);
+
+  // State should be unchanged.
+  EXPECT_TRUE(modifier.HasActiveModel());
+  EXPECT_EQ(modifier.GetViewId(), 456);
+}
+
+// Verify that OnViewRemoved does not reset state for the implicit view.
+TEST_F(TextInputPluginTest, OnViewRemovedIgnoresImplicitView) {
+  UseEngineWithView();
+
+  TestBinaryMessenger messenger([](const std::string& channel,
+                                   const uint8_t* message, size_t message_size,
+                                   BinaryReply reply) {});
+  BinaryReply reply_handler = [](const uint8_t* reply, size_t reply_size) {};
+
+  TextInputPlugin handler(&messenger, engine());
+  TextInputPluginModifier modifier(&handler);
+
+  // Set a client to create an active model. EncodedClientConfig sets view_id
+  // to 456, so we override it to the implicit view id afterwards.
+  auto& codec = JsonMethodCodec::GetInstance();
+  auto set_client_message = codec.EncodeMethodCall(
+      {"TextInput.setClient",
+       EncodedClientConfig("TextInputType.text", "TextInputAction.done")});
+  messenger.SimulateEngineMessage(kChannelName, set_client_message->data(),
+                                  set_client_message->size(), reply_handler);
+
+  EXPECT_TRUE(modifier.HasActiveModel());
+  modifier.SetViewId(kImplicitViewId);
+
+  // Attempt to remove the implicit view.
+  handler.OnViewRemoved(kImplicitViewId);
+
+  // State should be unchanged for the implicit view.
+  EXPECT_TRUE(modifier.HasActiveModel());
+  EXPECT_EQ(modifier.GetViewId(), kImplicitViewId);
 }
 
 }  // namespace testing

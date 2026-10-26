@@ -8,6 +8,7 @@
 #include <variant>
 
 #include "flutter/fml/make_copyable.h"
+#include "impeller/display_list/aiks_context.h"
 
 // Disable a warning on Windows about use of deprecated atomic operations
 // on std::shared_ptr.  These functions are used because libcxx does not
@@ -46,13 +47,9 @@ DlDeferredImageGPUImpeller::DlDeferredImageGPUImpeller(
 DlDeferredImageGPUImpeller::~DlDeferredImageGPUImpeller() = default;
 
 // |DlImage|
-sk_sp<SkImage> DlDeferredImageGPUImpeller::skia_image() const {
-  return nullptr;
-};
-
-// |DlImage|
 std::shared_ptr<impeller::Texture>
-DlDeferredImageGPUImpeller::impeller_texture() const {
+DlDeferredImageGPUImpeller::GetImpellerTexture(
+    impeller::ContentContext& renderer) const {
   if (!wrapper_) {
     return nullptr;
   }
@@ -60,14 +57,27 @@ DlDeferredImageGPUImpeller::impeller_texture() const {
 }
 
 // |DlImage|
-bool DlDeferredImageGPUImpeller::isOpaque() const {
-  // Impeller doesn't currently implement opaque alpha types.
-  return false;
+flutter::DlColorSpace DlDeferredImageGPUImpeller::GetColorSpace() const {
+  if (!wrapper_) {
+    return flutter::DlColorSpace::kSRGB;
+  }
+  std::shared_ptr<impeller::Texture> texture = wrapper_->texture();
+  if (!texture) {
+    return flutter::DlColorSpace::kSRGB;
+  }
+  switch (texture->GetTextureDescriptor().format) {
+    case impeller::PixelFormat::kB10G10R10XR:
+    case impeller::PixelFormat::kR16G16B16A16Float:
+      return flutter::DlColorSpace::kExtendedSRGB;
+    default:
+      return flutter::DlColorSpace::kSRGB;
+  }
 }
 
 // |DlImage|
-bool DlDeferredImageGPUImpeller::isTextureBacked() const {
-  return wrapper_ && wrapper_->isTextureBacked();
+bool DlDeferredImageGPUImpeller::isOpaque() const {
+  // Impeller doesn't currently implement opaque alpha types.
+  return false;
 }
 
 // |DlImage|
@@ -142,11 +152,6 @@ DlDeferredImageGPUImpeller::ImageWrapper::texture() const {
   return std::atomic_load(&texture_);
 }
 
-bool DlDeferredImageGPUImpeller::ImageWrapper::isTextureBacked() const {
-  std::shared_ptr<impeller::Texture> tex = texture();
-  return tex && tex->IsValid();
-}
-
 void DlDeferredImageGPUImpeller::ImageWrapper::SnapshotDisplayList(
     std::variant<sk_sp<DisplayList>, std::unique_ptr<LayerTree>> content) {
   fml::TaskRunner::RunNowOrPostTask(
@@ -163,27 +168,37 @@ void DlDeferredImageGPUImpeller::ImageWrapper::SnapshotDisplayList(
           return;
         }
 
-        sk_sp<DisplayList> display_list;
-
+        SnapshotDelegate::SnapshotDisplayListProvider provider;
         if (std::holds_alternative<sk_sp<DisplayList>>(content)) {
-          display_list = std::get<sk_sp<DisplayList>>(std::move(content));
+          provider = [display_list =
+                          std::get<sk_sp<DisplayList>>(std::move(content))](
+                         impeller::AiksContext*) { return display_list; };
         } else if (std::holds_alternative<std::unique_ptr<LayerTree>>(
                        content)) {
-          std::unique_ptr<LayerTree> layer_tree =
-              std::get<std::unique_ptr<LayerTree>>(std::move(content));
-          display_list = layer_tree->Flatten(
-              DlRect::MakeWH(wrapper->size_.width, wrapper->size_.height),
-              snapshot_delegate->GetTextureRegistry());
+          // Flatten only once the snapshot controller has made a rendering
+          // context current, and with the AiksContext that renders the
+          // snapshot. https://github.com/flutter/flutter/issues/192365
+          provider = fml::MakeCopyable(
+              [layer_tree =
+                   std::get<std::unique_ptr<LayerTree>>(std::move(content)),
+               texture_registry = snapshot_delegate->GetTextureRegistry(),
+               bounds =
+                   DlRect::MakeWH(wrapper->size_.width, wrapper->size_.height)](
+                  impeller::AiksContext* aiks_context) mutable {
+                return layer_tree->Flatten(bounds, texture_registry,
+                                           /*gr_context=*/nullptr,
+                                           aiks_context);
+              });
         }
 
-        auto snapshot = snapshot_delegate->MakeRasterSnapshotSync(
-            display_list, wrapper->size_, wrapper->pixel_format_);
-        if (!snapshot) {
+        auto texture = snapshot_delegate->MakeImpellerSnapshotSync(
+            std::move(provider), wrapper->size_, wrapper->pixel_format_);
+        if (!texture) {
           std::scoped_lock lock(wrapper->error_mutex_);
           wrapper->error_ = "Failed to create snapshot.";
           return;
         }
-        std::atomic_store(&wrapper->texture_, snapshot->impeller_texture());
+        std::atomic_store(&wrapper->texture_, texture);
       }));
 }
 

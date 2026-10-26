@@ -18,6 +18,7 @@
 #include "impeller/display_list/aiks_context.h"
 #include "impeller/display_list/canvas.h"
 #include "impeller/display_list/dl_atlas_geometry.h"
+#include "impeller/display_list/dl_image_impeller.h"
 #include "impeller/display_list/dl_text_impeller.h"
 #include "impeller/display_list/dl_vertices_geometry.h"
 #include "impeller/display_list/nine_patch_converter.h"
@@ -148,7 +149,7 @@ static std::optional<const Rect> ToOptRect(const flutter::DlRect* rect) {
 void DlDispatcherBase::setAntiAlias(bool aa) {
   AUTO_DEPTH_WATCHER(0u);
 
-  // Nothing to do because AA is implicit.
+  paint_.anti_alias = aa;
 }
 
 static Paint::Style ToStyle(flutter::DlDrawStyle style) {
@@ -678,6 +679,14 @@ void DlDispatcherBase::drawPoints(flutter::DlPointMode mode,
   }
 }
 
+std::shared_ptr<Texture> DlDispatcherBase::GetTexture(
+    const sk_sp<flutter::DlImage>& image) {
+  if (!image) {
+    return nullptr;
+  }
+  return image->asImpellerImage()->GetCachedTexture(GetContentContext());
+}
+
 void DlDispatcherBase::drawVertices(
     const std::shared_ptr<flutter::DlVertices>& vertices,
     flutter::DlBlendMode dl_mode) {}
@@ -693,7 +702,7 @@ void DlDispatcherBase::drawImage(const sk_sp<flutter::DlImage> image,
     return;
   }
 
-  auto texture = image->impeller_texture();
+  auto texture = GetTexture(image);
   if (!texture) {
     return;
   }
@@ -722,7 +731,7 @@ void DlDispatcherBase::drawImageRect(const sk_sp<flutter::DlImage> image,
   AUTO_DEPTH_WATCHER(1u);
 
   GetCanvas().DrawImageRect(
-      image->impeller_texture(),                       // image
+      GetTexture(image),                               // image
       src,                                             // source rect
       dst,                                             // destination rect
       render_with_attributes ? paint_ : Paint(),       // paint
@@ -739,7 +748,7 @@ void DlDispatcherBase::drawImageNine(const sk_sp<flutter::DlImage> image,
   AUTO_DEPTH_WATCHER(9u);
 
   NinePatchConverter converter = {};
-  converter.DrawNinePatch(image->impeller_texture(),
+  converter.DrawNinePatch(GetTexture(image),
                           Rect::MakeLTRB(center.GetLeft(), center.GetTop(),
                                          center.GetRight(), center.GetBottom()),
                           dst, ToSamplerDescriptor(filter), &GetCanvas(),
@@ -759,7 +768,7 @@ void DlDispatcherBase::drawAtlas(const sk_sp<flutter::DlImage> atlas,
   AUTO_DEPTH_WATCHER(1u);
 
   auto geometry =
-      DlAtlasGeometry(atlas->impeller_texture(),                        //
+      DlAtlasGeometry(GetTexture(atlas),                                //
                       xform,                                            //
                       tex,                                              //
                       colors,                                           //
@@ -933,7 +942,8 @@ CanvasDlDispatcher::CanvasDlDispatcher(ContentContext& renderer,
                                        bool has_root_backdrop_filter,
                                        flutter::DlBlendMode max_root_blend_mode,
                                        IRect32 cull_rect)
-    : canvas_(renderer,
+    : DlDispatcherBase(),
+      canvas_(renderer,
               render_target,
               is_onscreen,
               has_root_backdrop_filter ||
@@ -943,6 +953,10 @@ CanvasDlDispatcher::CanvasDlDispatcher(ContentContext& renderer,
 
 Canvas& CanvasDlDispatcher::GetCanvas() {
   return canvas_;
+}
+
+ContentContext& CanvasDlDispatcher::GetContentContext() const {
+  return renderer_;
 }
 
 void CanvasDlDispatcher::drawVertices(
@@ -979,29 +993,52 @@ void FirstPassDispatcher::save() {
   cull_rect_state_.push_back(cull_rect_state_.back());
 }
 
+namespace {
+void RecordBackdropData(
+    std::unordered_map<int64_t, BackdropData>* backdrop_data,
+    int64_t backdrop_id,
+    const std::shared_ptr<flutter::DlImageFilter>& shared_backdrop,
+    const Rect& layer_coverage) {
+  auto existing = backdrop_data->find(backdrop_id);
+  if (existing == backdrop_data->end()) {
+    (*backdrop_data)[backdrop_id] =
+        BackdropData{.backdrop_count = 1,
+                     .all_filters_equal = true,
+                     .texture_slot = nullptr,
+                     .shared_filter_snapshot = std::nullopt,
+                     .last_backdrop = shared_backdrop,
+                     .coverage_union = layer_coverage};
+  } else {
+    BackdropData& data = existing->second;
+    data.backdrop_count++;
+    if (data.all_filters_equal) {
+      data.all_filters_equal = (*data.last_backdrop == *shared_backdrop);
+      data.last_backdrop = shared_backdrop;
+    }
+    data.coverage_union = data.coverage_union.Union(layer_coverage);
+  }
+}
+}  // namespace
+
 void FirstPassDispatcher::saveLayer(const DlRect& bounds,
                                     const flutter::SaveLayerOptions options,
                                     const flutter::DlImageFilter* backdrop,
                                     std::optional<int64_t> backdrop_id) {
   save();
 
+  const bool has_layer_bounds =
+      !bounds.IsMaximum() &&
+      (!bounds.IsEmpty() || options.bounds_from_caller());
+
   backdrop_count_ += (backdrop == nullptr ? 0 : 1);
   if (backdrop != nullptr && backdrop_id.has_value()) {
-    std::shared_ptr<flutter::DlImageFilter> shared_backdrop =
-        backdrop->shared();
-    std::unordered_map<int64_t, BackdropData>::iterator existing =
-        backdrop_data_.find(backdrop_id.value());
-    if (existing == backdrop_data_.end()) {
-      backdrop_data_[backdrop_id.value()] =
-          BackdropData{.backdrop_count = 1, .last_backdrop = shared_backdrop};
-    } else {
-      BackdropData& data = existing->second;
-      data.backdrop_count++;
-      if (data.all_filters_equal) {
-        data.all_filters_equal = (*data.last_backdrop == *shared_backdrop);
-        data.last_backdrop = shared_backdrop;
-      }
+    Rect layer_coverage = cull_rect_state_.back();
+    if (has_layer_bounds) {
+      layer_coverage =
+          layer_coverage.IntersectionOrEmpty(bounds.TransformBounds(matrix_));
     }
+    RecordBackdropData(&backdrop_data_, backdrop_id.value(), backdrop->shared(),
+                       layer_coverage);
   }
 
   // This dispatcher does not track enough state to accurately compute
@@ -1009,14 +1046,9 @@ void FirstPassDispatcher::saveLayer(const DlRect& bounds,
   auto global_cull_rect = cull_rect_state_.back();
   if (has_image_filter_ || global_cull_rect.IsMaximum()) {
     cull_rect_state_.back() = Rect::MakeMaximum();
-  } else {
-    auto global_save_bounds = bounds.TransformBounds(matrix_);
-    auto new_cull_rect = global_cull_rect.Intersection(global_save_bounds);
-    if (new_cull_rect.has_value()) {
-      cull_rect_state_.back() = new_cull_rect.value();
-    } else {
-      cull_rect_state_.back() = Rect::MakeLTRB(0, 0, 0, 0);
-    }
+  } else if (has_layer_bounds) {
+    cull_rect_state_.back() =
+        global_cull_rect.IntersectionOrEmpty(bounds.TransformBounds(matrix_));
   }
 }
 
@@ -1024,6 +1056,54 @@ void FirstPassDispatcher::restore() {
   matrix_ = stack_.back();
   stack_.pop_back();
   cull_rect_state_.pop_back();
+}
+
+namespace {
+void Clip(std::vector<Rect>& cull_rect_state,
+          const Matrix& matrix,
+          const DlRect& bounds,
+          flutter::DlClipOp clip_op) {
+  if (clip_op == flutter::DlClipOp::kIntersect) {
+    auto global_rect = bounds.TransformBounds(matrix);
+    cull_rect_state.back() =
+        cull_rect_state.back().IntersectionOrEmpty(global_rect);
+  }
+}
+}  // namespace
+
+// |flutter::DlOpReceiver|
+void FirstPassDispatcher::clipRect(const DlRect& rect,
+                                   flutter::DlClipOp clip_op,
+                                   bool is_aa) {
+  Clip(cull_rect_state_, matrix_, rect, clip_op);
+}
+
+// |flutter::DlOpReceiver|
+void FirstPassDispatcher::clipOval(const DlRect& bounds,
+                                   flutter::DlClipOp clip_op,
+                                   bool is_aa) {
+  Clip(cull_rect_state_, matrix_, bounds, clip_op);
+}
+
+// |flutter::DlOpReceiver|
+void FirstPassDispatcher::clipRoundRect(const DlRoundRect& rrect,
+                                        flutter::DlClipOp clip_op,
+                                        bool is_aa) {
+  Clip(cull_rect_state_, matrix_, rrect.GetBounds(), clip_op);
+}
+
+// |flutter::DlOpReceiver|
+void FirstPassDispatcher::clipPath(const DlPath& path,
+                                   flutter::DlClipOp clip_op,
+                                   bool is_aa) {
+  Clip(cull_rect_state_, matrix_, path.GetBounds(), clip_op);
+}
+
+// |flutter::DlOpReceiver|
+void FirstPassDispatcher::clipRoundSuperellipse(const DlRoundSuperellipse& rse,
+                                                flutter::DlClipOp clip_op,
+                                                bool is_aa) {
+  Clip(cull_rect_state_, matrix_, rse.GetBounds(), clip_op);
 }
 
 void FirstPassDispatcher::translate(DlScalar tx, DlScalar ty) {
@@ -1085,23 +1165,20 @@ void FirstPassDispatcher::drawText(const std::shared_ptr<flutter::DlText>& text,
     return;
   }
 
-  if (paint_.style == Paint::Style::kStroke) {
-    properties.stroke = paint_.stroke;
-  }
+  properties.stroke = paint_.GetStroke();
 
   if (text_frame->HasColor()) {
     // Alpha is always applied when rendering, remove it here so
     // we do not double-apply the alpha.
-    properties.color = paint_.color.WithAlpha(1.0);
+    properties.tone_or_color = paint_.color.WithAlpha(1.0);
+  } else {
+    properties.tone_or_color = GlyphProperties::ComputeTone(paint_.color);
   }
 
-  renderer_.GetLazyGlyphAtlas()->AddTextFrame(
-      text_frame,   //
-      Point(x, y),  //
-      matrix_,
-      (properties.stroke.has_value() || text_frame->HasColor())  //
-          ? std::optional<GlyphProperties>(properties)           //
-          : std::nullopt                                         //
+  renderer_.GetLazyGlyphAtlas()->AddTextFrame(text_frame,   //
+                                              Point(x, y),  //
+                                              matrix_,      //
+                                              properties    //
   );
 }
 
@@ -1217,7 +1294,7 @@ FirstPassDispatcher::TakeBackdropData() {
 std::shared_ptr<Texture> DisplayListToTexture(
     const sk_sp<flutter::DisplayList>& display_list,
     ISize size,
-    AiksContext& context,
+    ContentContext& context,
     bool reset_host_buffer,
     bool generate_mips,
     std::optional<PixelFormat> target_pixel_format) {
@@ -1265,11 +1342,11 @@ std::shared_ptr<Texture> DisplayListToTexture(
   }
 
   DlIRect cull_rect = DlIRect::MakeWH(size.width, size.height);
-  impeller::FirstPassDispatcher collector(
-      context.GetContentContext(), impeller::Matrix(), Rect::MakeSize(size));
+  impeller::FirstPassDispatcher collector(context, impeller::Matrix(),
+                                          Rect::MakeSize(size));
   display_list->Dispatch(collector, cull_rect);
   impeller::CanvasDlDispatcher impeller_dispatcher(
-      context.GetContentContext(),               //
+      context,                                   //
       target,                                    //
       /*is_onscreen=*/false,                     //
       display_list->root_has_backdrop_filter(),  //
@@ -1278,14 +1355,14 @@ std::shared_ptr<Texture> DisplayListToTexture(
   );
   const auto& [data, count] = collector.TakeBackdropData();
   impeller_dispatcher.SetBackdropData(data, count);
-  context.GetContentContext().GetTextShadowCache().MarkFrameStart();
+  context.GetTextShadowCache().MarkFrameStart();
   fml::ScopedCleanupClosure cleanup([&] {
     if (reset_host_buffer) {
-      context.GetContentContext().GetTransientsDataBuffer().Reset();
-      context.GetContentContext().GetTransientsIndexesBuffer().Reset();
+      context.GetTransientsDataBuffer().Reset();
+      context.GetTransientsIndexesBuffer().Reset();
     }
-    context.GetContentContext().GetTextShadowCache().MarkFrameEnd();
-    context.GetContentContext().GetLazyGlyphAtlas()->ResetTextFrames();
+    context.GetTextShadowCache().MarkFrameEnd();
+    context.GetLazyGlyphAtlas()->ResetTextFrames();
     context.GetContext()->DisposeThreadLocalCachedResources();
   });
 
@@ -1293,6 +1370,18 @@ std::shared_ptr<Texture> DisplayListToTexture(
   impeller_dispatcher.FinishRecording();
 
   return target.GetRenderTargetTexture();
+}
+
+std::shared_ptr<Texture> DisplayListToTexture(
+    const sk_sp<flutter::DisplayList>& display_list,
+    ISize size,
+    AiksContext& context,
+    bool reset_host_buffer,
+    bool generate_mips,
+    std::optional<PixelFormat> target_pixel_format) {
+  return DisplayListToTexture(display_list, size, context.GetContentContext(),
+                              reset_host_buffer, generate_mips,
+                              target_pixel_format);
 }
 
 bool RenderToTarget(ContentContext& context,

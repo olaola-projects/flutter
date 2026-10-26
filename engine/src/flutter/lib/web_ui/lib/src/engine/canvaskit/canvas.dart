@@ -26,7 +26,22 @@ class CkCanvas implements LayerCanvas {
     return ckRecorder.beginRecording(cullRect);
   }
 
-  CkCanvas.fromSkCanvas(this.skCanvas);
+  CkCanvas.fromSkCanvas(this.skCanvas, {CkPictureRecorder? recorder, PictureImageTracker? tracker})
+    : _recorder = recorder,
+      _tracker = tracker;
+
+  // Holds a reference to the recorder to prevent premature garbage collection
+  // of the recorder while this canvas is active. This ensures the recorder's
+  // finalizer does not run prematurely to release tracked image sources.
+  // ignore: unused_field
+  final CkPictureRecorder? _recorder;
+  PictureImageTracker? _tracker;
+
+  /// Clears the tracker reference when recording finishes so subsequent
+  /// operations (if any) do not retain images.
+  void clearTracker() {
+    _tracker = null;
+  }
 
   // Cubic equation coefficients recommended by Mitchell & Netravali
   // in their paper on cubic interpolation.
@@ -44,9 +59,11 @@ class CkCanvas implements LayerCanvas {
 
   @override
   void clipPath(ui.Path path, {bool doAntiAlias = true}) {
-    final SkPath skPath = ((path as LazyPath).builtPath as CkPath).snapshotSkPath();
-    skCanvas.clipPath(skPath, _clipOpIntersect, doAntiAlias);
-    skPath.delete();
+    skCanvas.clipPath(
+      ((path as EnginePath).backendPath as CkPath).skiaObject,
+      _clipOpIntersect,
+      doAntiAlias,
+    );
   }
 
   @override
@@ -59,11 +76,11 @@ class CkCanvas implements LayerCanvas {
   void clipRSuperellipse(ui.RSuperellipse rsuperellipse, {bool doAntiAlias = true}) {
     final (ui.Path path, ui.Offset offset) = rsuperellipse.toPathOffset();
     translate(offset.dx, offset.dy);
-
-    final SkPath skPath = ((path as LazyPath).builtPath as CkPath).snapshotSkPath();
-    skCanvas.clipPath(skPath, _clipOpIntersect, doAntiAlias);
-    skPath.delete();
-
+    skCanvas.clipPath(
+      ((path as EnginePath).backendPath as CkPath).skiaObject,
+      _clipOpIntersect,
+      doAntiAlias,
+    );
     translate(-offset.dx, -offset.dy);
   }
 
@@ -80,6 +97,7 @@ class CkCanvas implements LayerCanvas {
   @override
   void drawArc(ui.Rect oval, double startAngle, double sweepAngle, bool useCenter, ui.Paint paint) {
     assert(rectIsValid(oval));
+    _tracker?.recordPaint(paint);
     const double toDegrees = 180 / math.pi;
 
     final SkPaint skPaint = (paint as CkPaint).toSkPaint();
@@ -96,6 +114,7 @@ class CkCanvas implements LayerCanvas {
   @override
   void drawCircle(ui.Offset c, double radius, ui.Paint paint) {
     assert(offsetIsValid(c));
+    _tracker?.recordPaint(paint);
     final SkPaint skPaint = (paint as CkPaint).toSkPaint();
     skCanvas.drawCircle(c.dx, c.dy, radius, skPaint);
     skPaint.delete();
@@ -110,19 +129,35 @@ class CkCanvas implements LayerCanvas {
   void drawDRRect(ui.RRect outer, ui.RRect inner, ui.Paint paint) {
     assert(rrectIsValid(outer));
     assert(rrectIsValid(inner));
+    _tracker?.recordPaint(paint);
     final SkPaint skPaint = (paint as CkPaint).toSkPaint();
     skCanvas.drawDRRect(toSkRRect(outer), toSkRRect(inner), skPaint);
     skPaint.delete();
   }
 
+  SkImage _getSkImage(ui.Image image) {
+    if (image case EngineImage(backendImage: CkImageDelegate(:final skImage))) {
+      return skImage;
+    }
+    throw ArgumentError('The image being drawn must be a CanvasKit image.');
+  }
+
+  /// Draws [image] onto the canvas with its top-left corner at [offset].
+  ///
+  /// Retains the underlying DOM [ImageSource] for [image] and any shader
+  /// images in [paint] until the recorded picture is disposed.
   @override
   void drawImage(ui.Image image, ui.Offset offset, ui.Paint paint) {
     assert(offsetIsValid(offset));
+    _tracker?.recordImage(image);
+    _tracker?.recordPaint(paint);
+    final SkImage skImage = _getSkImage(image);
     final ui.FilterQuality filterQuality = paint.filterQuality;
     final SkPaint skPaint = (paint as CkPaint).toSkPaint(defaultBlurTileMode: ui.TileMode.clamp);
+
     if (filterQuality == ui.FilterQuality.high) {
       skCanvas.drawImageCubic(
-        (image as CkImage).skImage,
+        skImage,
         offset.dx,
         offset.dy,
         _kMitchellNetravali_B,
@@ -131,7 +166,7 @@ class CkCanvas implements LayerCanvas {
       );
     } else {
       skCanvas.drawImageOptions(
-        (image as CkImage).skImage,
+        skImage,
         offset.dx,
         offset.dy,
         toSkFilterMode(filterQuality),
@@ -146,11 +181,16 @@ class CkCanvas implements LayerCanvas {
   void drawImageRect(ui.Image image, ui.Rect src, ui.Rect dst, ui.Paint paint) {
     assert(rectIsValid(src));
     assert(rectIsValid(dst));
+    _tracker?.recordImage(image);
+    _tracker?.recordPaint(paint);
+    final SkImage skImage = _getSkImage(image);
+
     final ui.FilterQuality filterQuality = paint.filterQuality;
     final SkPaint skPaint = (paint as CkPaint).toSkPaint(defaultBlurTileMode: ui.TileMode.clamp);
+
     if (filterQuality == ui.FilterQuality.high) {
       skCanvas.drawImageRectCubic(
-        (image as CkImage).skImage,
+        skImage,
         toSkRect(src),
         toSkRect(dst),
         _kMitchellNetravali_B,
@@ -159,7 +199,7 @@ class CkCanvas implements LayerCanvas {
       );
     } else {
       skCanvas.drawImageRectOptions(
-        (image as CkImage).skImage,
+        skImage,
         toSkRect(src),
         toSkRect(dst),
         toSkFilterMode(filterQuality),
@@ -174,9 +214,12 @@ class CkCanvas implements LayerCanvas {
   void drawImageNine(ui.Image image, ui.Rect center, ui.Rect dst, ui.Paint paint) {
     assert(rectIsValid(center));
     assert(rectIsValid(dst));
+    _tracker?.recordImage(image);
+    _tracker?.recordPaint(paint);
+    final SkImage skImage = _getSkImage(image);
     final SkPaint skPaint = (paint as CkPaint).toSkPaint(defaultBlurTileMode: ui.TileMode.clamp);
     skCanvas.drawImageNine(
-      (image as CkImage).skImage,
+      skImage,
       toSkRect(center),
       toSkRect(dst),
       toSkFilterMode(paint.filterQuality),
@@ -189,6 +232,7 @@ class CkCanvas implements LayerCanvas {
   void drawLine(ui.Offset p1, ui.Offset p2, ui.Paint paint) {
     assert(offsetIsValid(p1));
     assert(offsetIsValid(p2));
+    _tracker?.recordPaint(paint);
     final SkPaint skPaint = (paint as CkPaint).toSkPaint();
     skCanvas.drawLine(p1.dx, p1.dy, p2.dx, p2.dy, skPaint);
     skPaint.delete();
@@ -197,6 +241,7 @@ class CkCanvas implements LayerCanvas {
   @override
   void drawOval(ui.Rect rect, ui.Paint paint) {
     assert(rectIsValid(rect));
+    _tracker?.recordPaint(paint);
     final SkPaint skPaint = (paint as CkPaint).toSkPaint();
     skCanvas.drawOval(toSkRect(rect), skPaint);
     skPaint.delete();
@@ -204,16 +249,27 @@ class CkCanvas implements LayerCanvas {
 
   @override
   void drawPaint(ui.Paint paint) {
+    _tracker?.recordPaint(paint);
     final SkPaint skPaint = (paint as CkPaint).toSkPaint();
     skCanvas.drawPaint(skPaint);
     skPaint.delete();
   }
 
+  /// Draws a text [paragraph] at [offset].
+  ///
+  /// Note: When [paragraph] is an [EngineParagraph], its layout and shaders are
+  /// encapsulated natively by SkParagraph. When [paragraph] is a [WebParagraph],
+  /// painting is dispatched back to this canvas where paints with image shaders
+  /// are automatically tracked.
   @override
   void drawParagraph(ui.Paragraph paragraph, ui.Offset offset) {
     assert(offsetIsValid(offset));
-    if (paragraph is CkParagraph) {
-      skCanvas.drawParagraph(paragraph.skiaObject, offset.dx, offset.dy);
+    if (paragraph is EngineParagraph) {
+      skCanvas.drawParagraph(
+        (paragraph.backendParagraph as CkParagraph).skiaObject,
+        offset.dx,
+        offset.dy,
+      );
     } else if (paragraph is WebParagraph) {
       paragraph.paint(this, offset);
     } else {
@@ -223,21 +279,24 @@ class CkCanvas implements LayerCanvas {
 
   @override
   void drawPath(ui.Path path, ui.Paint paint) {
+    _tracker?.recordPaint(paint);
     final SkPaint skPaint = (paint as CkPaint).toSkPaint();
-    final SkPath skPath = ((path as LazyPath).builtPath as CkPath).snapshotSkPath();
-    skCanvas.drawPath(skPath, skPaint);
-    skPath.delete();
+    skCanvas.drawPath(((path as EnginePath).backendPath as CkPath).skiaObject, skPaint);
     skPaint.delete();
   }
 
   @override
   void drawPicture(ui.Picture picture) {
     assert((picture as CkPicture).debugCheckNotDisposed('Failed to draw picture.'));
+    if (picture case CkPicture(:final imageTracker?)) {
+      _tracker?.recordFrom(imageTracker);
+    }
     skCanvas.drawPicture((picture as CkPicture).skiaObject);
   }
 
   @override
   void drawPoints(ui.PointMode pointMode, List<ui.Offset> points, ui.Paint paint) {
+    _tracker?.recordPaint(paint);
     final SkFloat32List skPoints = toMallocedSkPoints(points);
     final SkPaint skPaint = (paint as CkPaint).toSkPaint();
     skCanvas.drawPoints(toSkPointMode(pointMode), skPoints.toTypedArray(), skPaint);
@@ -250,6 +309,7 @@ class CkCanvas implements LayerCanvas {
     if (points.length % 2 != 0) {
       throw ArgumentError('"points" must have an even number of values.');
     }
+    _tracker?.recordPaint(paint);
     final SkPaint skPaint = (paint as CkPaint).toSkPaint();
     skCanvas.drawPoints(toSkPointMode(pointMode), points, skPaint);
     skPaint.delete();
@@ -258,6 +318,7 @@ class CkCanvas implements LayerCanvas {
   @override
   void drawRRect(ui.RRect rrect, ui.Paint paint) {
     assert(rrectIsValid(rrect));
+    _tracker?.recordPaint(paint);
     final SkPaint skPaint = (paint as CkPaint).toSkPaint();
     skCanvas.drawRRect(toSkRRect(rrect), skPaint);
     skPaint.delete();
@@ -265,14 +326,11 @@ class CkCanvas implements LayerCanvas {
 
   @override
   void drawRSuperellipse(ui.RSuperellipse rsuperellipse, ui.Paint paint) {
+    _tracker?.recordPaint(paint);
     final SkPaint skPaint = (paint as CkPaint).toSkPaint();
     final (ui.Path path, ui.Offset offset) = rsuperellipse.toPathOffset();
     translate(offset.dx, offset.dy);
-
-    final SkPath skPath = ((path as LazyPath).builtPath as CkPath).snapshotSkPath();
-    skCanvas.drawPath(skPath, skPaint);
-    skPath.delete();
-
+    skCanvas.drawPath(((path as EnginePath).backendPath as CkPath).skiaObject, skPaint);
     translate(-offset.dx, -offset.dy);
     skPaint.delete();
   }
@@ -280,6 +338,7 @@ class CkCanvas implements LayerCanvas {
   @override
   void drawRect(ui.Rect rect, ui.Paint paint) {
     assert(rectIsValid(rect));
+    _tracker?.recordPaint(paint);
     final SkPaint skPaint = (paint as CkPaint).toSkPaint();
     skCanvas.drawRect(toSkRect(rect), skPaint);
     skPaint.delete();
@@ -289,7 +348,7 @@ class CkCanvas implements LayerCanvas {
   void drawShadow(ui.Path path, ui.Color color, double elevation, bool transparentOccluder) {
     drawSkShadow(
       skCanvas,
-      (path as LazyPath).builtPath as CkPath,
+      ((path as EnginePath).backendPath as CkPath).skiaObject,
       color,
       elevation,
       transparentOccluder,
@@ -299,10 +358,11 @@ class CkCanvas implements LayerCanvas {
 
   @override
   void drawVertices(ui.Vertices vertices, ui.BlendMode blendMode, ui.Paint paint) {
-    final ckVertices = vertices as CkVertices;
-    if (ckVertices.hasNoPoints) {
+    final ckVertices = (vertices as EngineVertices).delegate as CkVertices?;
+    if (ckVertices == null) {
       return;
     }
+    _tracker?.recordPaint(paint);
     final SkPaint skPaint = (paint as CkPaint).toSkPaint();
     skCanvas.drawVertices(ckVertices.skiaObject, toSkBlendMode(blendMode), skPaint);
     skPaint.delete();
@@ -330,6 +390,7 @@ class CkCanvas implements LayerCanvas {
 
   @override
   void saveLayer(ui.Rect? bounds, ui.Paint paint) {
+    _tracker?.recordPaint(paint);
     if (bounds == null) {
       saveLayerWithoutBounds(paint);
     } else {
@@ -352,32 +413,36 @@ class CkCanvas implements LayerCanvas {
 
   @override
   void saveLayerWithFilter(ui.Rect? bounds, ui.Paint? paint, ui.ImageFilter filter) {
-    final CkManagedSkImageFilterConvertible convertible;
+    _tracker?.recordPaint(paint);
+    final EngineImageFilter engineFilter;
     if (filter is ui.ColorFilter) {
-      convertible = createCkColorFilter(filter as EngineColorFilter)!;
+      engineFilter = EngineColorFilterImageFilter(colorFilter: filter as EngineColorFilter);
     } else {
-      convertible = filter as CkManagedSkImageFilterConvertible;
+      engineFilter = filter as EngineImageFilter;
     }
+
     // There are 2 ImageFilter objects applied here. The filter in the paint
     // object is applied to the contents and its default tile mode is decal
     // (automatically applied by toSkPaint).
-    // The filter supplied as an argument to this function [convertible] will
+    // The filter supplied as an argument to this function [engineFilter] will
     // be applied to the backdrop and its default tile mode will be mirror.
     // We also pass in the blur tile mode as an argument to saveLayer because
     // that operation will not adopt the tile mode from the backdrop filter
     // and instead needs it supplied to the saveLayer call itself as a
     // separate argument.
-    convertible.withSkImageFilter((SkImageFilter filter) {
-      final SkPaint? skPaint = (paint as CkPaint?)?.toSkPaint(/*ui.TileMode.decal*/);
-      skCanvas.saveLayer(
-        skPaint,
-        bounds == null ? null : toSkRect(bounds),
-        filter,
-        0,
-        toSkTileMode(convertible.backdropTileMode ?? ui.TileMode.mirror),
-      );
-      skPaint?.delete();
-    }, defaultBlurTileMode: ui.TileMode.mirror);
+    final backendFilter =
+        engineFilter.getBackendFilter(defaultBlurTileMode: ui.TileMode.mirror) as CkImageFilter;
+    final SkImageFilter? skFilter = backendFilter.nativeFilter;
+
+    final SkPaint? skPaint = (paint as CkPaint?)?.toSkPaint(/*ui.TileMode.decal*/);
+    skCanvas.saveLayer(
+      skPaint,
+      bounds == null ? null : toSkRect(bounds),
+      skFilter,
+      0,
+      toSkTileMode(engineFilter.backdropTileMode ?? ui.TileMode.mirror),
+    );
+    skPaint?.delete();
   }
 
   @override
@@ -440,6 +505,9 @@ class CkCanvas implements LayerCanvas {
         'If non-null, "colors" length must match that of "transforms" and "rects".',
       );
     }
+    _tracker?.recordImage(atlas);
+    _tracker?.recordPaint(paint);
+    final SkImage skAtlas = _getSkImage(atlas);
 
     final rstTransformBuffer = Float32List(rectCount * 4);
     final rectBuffer = Float32List(rectCount * 4);
@@ -468,7 +536,7 @@ class CkCanvas implements LayerCanvas {
 
     _drawAtlas(
       paint as CkPaint,
-      atlas as CkImage,
+      skAtlas,
       rstTransformBuffer,
       rectBuffer,
       colorBuffer,
@@ -500,6 +568,9 @@ class CkCanvas implements LayerCanvas {
         'If non-null, "colors" length must be one fourth the length of "rstTransforms" and "rects".',
       );
     }
+    _tracker?.recordImage(atlas);
+    _tracker?.recordPaint(paint);
+    final SkImage skAtlas = _getSkImage(atlas);
 
     Uint32List? unsignedColors;
     if (colors != null) {
@@ -508,7 +579,7 @@ class CkCanvas implements LayerCanvas {
 
     _drawAtlas(
       paint as CkPaint,
-      atlas as CkImage,
+      skAtlas,
       rstTransforms,
       rects,
       unsignedColors,
@@ -516,10 +587,9 @@ class CkCanvas implements LayerCanvas {
     );
   }
 
-  // TODO(flar): CanvasKit does not expose sampling options available on SkCanvas.drawAtlas
   void _drawAtlas(
     CkPaint paint,
-    CkImage atlas,
+    SkImage atlas,
     Float32List rstTransforms,
     Float32List rects,
     Uint32List? colors,
@@ -527,12 +597,13 @@ class CkCanvas implements LayerCanvas {
   ) {
     final SkPaint skPaint = paint.toSkPaint(defaultBlurTileMode: ui.TileMode.clamp);
     skCanvas.drawAtlas(
-      atlas.skImage,
+      atlas,
       rects,
       rstTransforms,
       skPaint,
       toSkBlendMode(blendMode),
       colors,
+      toSkFilterOptions(paint.filterQuality),
     );
     skPaint.delete();
   }

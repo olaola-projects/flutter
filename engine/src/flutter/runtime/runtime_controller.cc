@@ -374,6 +374,15 @@ bool RuntimeController::DispatchPointerDataPacket(
   return false;
 }
 
+HitTestResponse RuntimeController::HitTest(int64_t view_id,
+                                           const flutter::PointData offset) {
+  if (auto* platform_configuration = GetPlatformConfigurationIfAvailable()) {
+    TRACE_EVENT0("flutter", "RuntimeController::HitTest");
+    return platform_configuration->HitTest(view_id, offset);
+  }
+  return {.has_platform_view = false};
+}
+
 bool RuntimeController::DispatchSemanticsAction(int64_t view_id,
                                                 int32_t node_id,
                                                 SemanticsAction action,
@@ -479,6 +488,11 @@ void RuntimeController::UpdateIsolateDescription(const std::string isolate_name,
 // |PlatformConfigurationClient|
 void RuntimeController::SetNeedsReportTimings(bool value) {
   client_.SetNeedsReportTimings(value);
+}
+
+// |PlatformConfigurationClient|
+void RuntimeController::ResetInternalState() {
+  client_.ResetInternalState();
 }
 
 // |PlatformConfigurationClient|

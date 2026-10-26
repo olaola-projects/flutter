@@ -23,16 +23,12 @@ const kManuallyPinnedDependencies = <String, String>{
   'archive': '3.6.1', // https://github.com/flutter/flutter/issues/115660
   'flutter_gallery_assets': '1.0.2', // Tests depend on the exact version.
   'flutter_template_images': '5.0.0', // Must always exactly match flutter_tools template.
-  'google_mobile_ads': '5.1.0', // https://github.com/flutter/flutter/issues/156912
   'material_color_utilities': '0.13.0', // Keep pinned to latest until 1.0.0.
-  'data_assets': '0.19.6', //  Keep pinned to latest until 1.0.0. Rolled by @dcharkes.
+  'data_assets': '0.20.0', //  Keep pinned to latest until 1.0.0. Rolled by @dcharkes.
+  // 3.27.1 requires iOS 15, but google_mobile_ads' Package.swift still declares
+  // iOS 13, so SwiftPM refuses to resolve the dependency and
+  // dev/benchmarks/platform_views_layout fails to build. Unpin once
+  // google_mobile_ads raises its minimum iOS version to 15.
+  // https://github.com/flutter/flutter/issues/194871
+  'webview_flutter_wkwebview': '3.27.0',
 };
-
-/// These are packages that are explicitly excluded from appearing in the list
-/// of pinned packages added to each pubspec.yaml.
-const kExplicitlyExcludedPackages = <String>[
-  '_macros', // Synthetic dependency for macros package, which isn't published.
-  // This is effectively pinned via the Dart SDK pin, see
-  // https://github.com/flutter/flutter/issues/148004 for more context.
-  'macros',
-];

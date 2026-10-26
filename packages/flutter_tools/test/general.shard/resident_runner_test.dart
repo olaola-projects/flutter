@@ -14,17 +14,19 @@ import 'package:flutter_tools/src/base/io.dart' as io;
 import 'package:flutter_tools/src/base/logger.dart';
 import 'package:flutter_tools/src/base/platform.dart';
 import 'package:flutter_tools/src/build_info.dart';
+import 'package:flutter_tools/src/build_system/build_system.dart';
+import 'package:flutter_tools/src/bundle.dart';
 import 'package:flutter_tools/src/compile.dart';
 import 'package:flutter_tools/src/dart/pub.dart';
 import 'package:flutter_tools/src/devfs.dart';
 import 'package:flutter_tools/src/device.dart';
 import 'package:flutter_tools/src/features.dart';
 import 'package:flutter_tools/src/globals.dart' as globals;
+import 'package:flutter_tools/src/isolated/build_targets.dart';
 import 'package:flutter_tools/src/project.dart';
-import 'package:flutter_tools/src/reporting/reporting.dart';
 import 'package:flutter_tools/src/resident_runner.dart';
-import 'package:flutter_tools/src/run_cold.dart';
 import 'package:flutter_tools/src/run_hot.dart';
+import 'package:flutter_tools/src/version.dart';
 import 'package:flutter_tools/src/vmservice.dart';
 import 'package:unified_analytics/unified_analytics.dart';
 import 'package:vm_service/vm_service.dart' as vm_service;
@@ -34,6 +36,7 @@ import '../src/context.dart';
 import '../src/fake_vm_services.dart';
 import '../src/fakes.dart';
 import '../src/package_config.dart';
+import '../src/test_build_system.dart';
 import '../src/testbed.dart';
 import '../src/throwing_pub.dart';
 import 'resident_runner_helpers.dart';
@@ -54,7 +57,7 @@ void main() {
         globals.fs.file(globals.fs.path.join('build', 'app.dill'))
           ..createSync(recursive: true)
           ..writeAsStringSync('ABC');
-        residentRunner = HotRunner(
+        residentRunner = createHotRunner(
           <FlutterDevice>[flutterDevice],
           stayResident: false,
           debuggingOptions: DebuggingOptions.enabled(BuildInfo.debug),
@@ -114,7 +117,7 @@ void main() {
       fakeVmServiceHost = FakeVmServiceHost(requests: <VmServiceExpectation>[listViews, listViews]);
       final residentCompiler = FakeResidentCompiler()
         ..nextOutput = const CompilerOutput('foo', 0, <Uri>[]);
-      residentRunner = HotRunner(
+      residentRunner = createHotRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.enabled(BuildInfo.debug),
@@ -137,7 +140,7 @@ void main() {
       fakeVmServiceHost = FakeVmServiceHost(requests: <VmServiceExpectation>[]);
       final residentCompiler = FakeResidentCompiler()
         ..nextOutput = const CompilerOutput('foo', 1, <Uri>[]);
-      residentRunner = HotRunner(
+      residentRunner = createHotRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.enabled(BuildInfo.debug),
@@ -158,7 +161,7 @@ void main() {
     () => testbed.run(() async {
       globals.fs.file(globals.fs.path.join('lib', 'main.dart')).createSync(recursive: true);
       fakeVmServiceHost = FakeVmServiceHost(requests: <VmServiceExpectation>[]);
-      residentRunner = ColdRunner(
+      residentRunner = createColdRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.enabled(BuildInfo.release),
@@ -178,7 +181,7 @@ void main() {
     () => testbed.run(() async {
       globals.fs.file(globals.fs.path.join('lib', 'main.dart')).createSync(recursive: true);
       fakeVmServiceHost = FakeVmServiceHost(requests: <VmServiceExpectation>[]);
-      residentRunner = ColdRunner(
+      residentRunner = createColdRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.enabled(BuildInfo.release),
@@ -199,7 +202,7 @@ void main() {
       fakeVmServiceHost = FakeVmServiceHost(requests: <VmServiceExpectation>[listViews, listViews]);
       final residentCompiler = FakeResidentCompiler()
         ..nextOutput = const CompilerOutput('foo', 0, <Uri>[]);
-      residentRunner = HotRunner(
+      residentRunner = createHotRunner(
         <FlutterDevice>[flutterDevice],
         applicationBinary: globals.fs.file('app-debug.apk'),
         stayResident: false,
@@ -240,7 +243,7 @@ void main() {
         contains(
           Event.hotRunnerInfo(
             label: 'exception',
-            targetPlatform: getNameForTargetPlatform(TargetPlatform.android_arm),
+            targetPlatform: TargetPlatform.android_arm.getName(),
             sdkName: 'Android',
             emulator: false,
             fullRestart: false,
@@ -248,7 +251,7 @@ void main() {
         ),
       );
       expect(fakeVmServiceHost?.hasRemainingExpectations, false);
-    }, overrides: <Type, Generator>{Usage: () => TestUsage()}),
+    }),
   );
 
   testUsingContext(
@@ -308,7 +311,7 @@ void main() {
         contains(
           Event.hotRunnerInfo(
             label: 'reload-barred',
-            targetPlatform: getNameForTargetPlatform(TargetPlatform.android_arm),
+            targetPlatform: TargetPlatform.android_arm.getName(),
             sdkName: 'Android',
             emulator: false,
             fullRestart: false,
@@ -316,7 +319,7 @@ void main() {
         ),
       );
       expect(fakeVmServiceHost?.hasRemainingExpectations, false);
-    }, overrides: <Type, Generator>{Usage: () => TestUsage()}),
+    }),
   );
 
   testUsingContext(
@@ -325,7 +328,7 @@ void main() {
       fakeVmServiceHost = FakeVmServiceHost(
         requests: <VmServiceExpectation>[listViews, listViews, listViews],
       );
-      residentRunner = HotRunner(
+      residentRunner = createHotRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         target: 'main.dart',
@@ -361,7 +364,7 @@ void main() {
         contains(
           Event.hotRunnerInfo(
             label: 'exception',
-            targetPlatform: getNameForTargetPlatform(TargetPlatform.android_arm),
+            targetPlatform: TargetPlatform.android_arm.getName(),
             sdkName: 'Android',
             emulator: false,
             fullRestart: false,
@@ -369,7 +372,7 @@ void main() {
         ),
       );
       expect(fakeVmServiceHost?.hasRemainingExpectations, false);
-    }, overrides: <Type, Generator>{Usage: () => TestUsage()}),
+    }),
   );
 
   testUsingContext(
@@ -391,7 +394,7 @@ void main() {
           ),
         ],
       );
-      residentRunner = HotRunner(
+      residentRunner = createHotRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.enabled(BuildInfo.debug),
@@ -424,12 +427,7 @@ void main() {
           listViews,
           listViews,
           listViews,
-          FakeVmServiceRequest(
-            method: 'getVM',
-            jsonResponse: vm_service.VM.parse(<String, Object>{
-              'isolates': <Object>[fakeUnpausedIsolate.toJson()],
-            })!.toJson(),
-          ),
+          getVm([fakeUnpausedIsolate]),
           const FakeVmServiceRequest(
             method: kReloadSourcesServiceName,
             args: <String, Object>{
@@ -482,12 +480,7 @@ void main() {
           listViews,
           listViews,
           listViews,
-          FakeVmServiceRequest(
-            method: 'getVM',
-            jsonResponse: vm_service.VM.parse(<String, Object>{
-              'isolates': <Object>[fakeUnpausedIsolate.toJson()],
-            })!.toJson(),
-          ),
+          getVm([fakeUnpausedIsolate]),
           const FakeVmServiceRequest(
             method: kReloadSourcesServiceName,
             args: <String, Object>{
@@ -547,12 +540,7 @@ void main() {
           listViews,
           listViews,
           listViews,
-          FakeVmServiceRequest(
-            method: 'getVM',
-            jsonResponse: vm_service.VM.parse(<String, Object>{
-              'isolates': <Object>[fakeUnpausedIsolate.toJson()],
-            })!.toJson(),
-          ),
+          getVm([fakeUnpausedIsolate]),
           const FakeVmServiceRequest(
             method: kReloadSourcesServiceName,
             args: <String, Object>{
@@ -594,11 +582,8 @@ void main() {
       final Event event = fakeAnalytics.sentEvents.first;
       expect(event.eventName.label, 'hot_runner_info');
       expect(event.eventData['label'], 'reload');
-      expect(
-        event.eventData['targetPlatform'],
-        getNameForTargetPlatform(TargetPlatform.android_arm),
-      );
-    }, overrides: <Type, Generator>{Usage: () => TestUsage()}),
+      expect(event.eventData['targetPlatform'], TargetPlatform.android_arm.getName());
+    }),
   );
 
   testUsingContext(
@@ -641,12 +626,13 @@ void main() {
           FakeResidentCompiler(),
           devFS,
         )..vmService = fakeVmServiceHost!.vmService;
-        residentRunner = HotRunner(
+        residentRunner = createHotRunner(
           <FlutterDevice>[flutterDevice],
           stayResident: false,
           debuggingOptions: DebuggingOptions.enabled(BuildInfo.debug),
           target: 'main.dart',
           analytics: fakeAnalytics,
+          projectFileInvalidator: FakeProjectFileInvalidator(),
         );
         devFS.nextUpdateReport = UpdateFSReport(success: true, invalidatedSourcesCount: 1);
 
@@ -676,8 +662,6 @@ void main() {
       overrides: <Type, Generator>{
         FileSystem: () => MemoryFileSystem.test(),
         Platform: () => FakePlatform(),
-        ProjectFileInvalidator: () => FakeProjectFileInvalidator(),
-        Usage: () => TestUsage(),
       },
     ),
   );
@@ -703,10 +687,7 @@ void main() {
             },
             jsonResponse: vm_service.Success().toJson(),
           ),
-          FakeVmServiceRequest(
-            method: 'getVM',
-            jsonResponse: vm_service.VM.parse(<String, Object>{})!.toJson(),
-          ),
+          getVm(),
           listViews,
           const FakeVmServiceRequest(
             method: 'streamListen',
@@ -747,11 +728,8 @@ void main() {
       expect(hotRunnerInfoEvents, hasLength(1));
       final Event newEvent = hotRunnerInfoEvents.first;
       expect(newEvent.eventData['label'], 'restart');
-      expect(
-        newEvent.eventData['targetPlatform'],
-        getNameForTargetPlatform(TargetPlatform.android_arm),
-      );
-    }, overrides: <Type, Generator>{Usage: () => TestUsage()}),
+      expect(newEvent.eventData['targetPlatform'], TargetPlatform.android_arm.getName());
+    }),
   );
 
   testUsingContext(
@@ -786,10 +764,7 @@ void main() {
             method: 'resume',
             args: <String, Object?>{'isolateId': fakeUnpausedIsolate.id},
           ),
-          FakeVmServiceRequest(
-            method: 'getVM',
-            jsonResponse: vm_service.VM.parse(<String, Object>{})!.toJson(),
-          ),
+          getVm(),
           listViews,
           const FakeVmServiceRequest(
             method: 'streamListen',
@@ -846,10 +821,7 @@ void main() {
             },
             jsonResponse: vm_service.Success().toJson(),
           ),
-          FakeVmServiceRequest(
-            method: 'getVM',
-            jsonResponse: vm_service.VM.parse(<String, Object>{})!.toJson(),
-          ),
+          getVm(),
           listViews,
           const FakeVmServiceRequest(
             method: 'streamListen',
@@ -881,10 +853,7 @@ void main() {
             },
             jsonResponse: vm_service.Success().toJson(),
           ),
-          FakeVmServiceRequest(
-            method: 'getVM',
-            jsonResponse: vm_service.VM.parse(<String, Object>{})!.toJson(),
-          ),
+          getVm(),
           listViews,
           const FakeVmServiceRequest(
             method: 'streamListen',
@@ -916,10 +885,7 @@ void main() {
             },
             jsonResponse: vm_service.Success().toJson(),
           ),
-          FakeVmServiceRequest(
-            method: 'getVM',
-            jsonResponse: vm_service.VM.parse(<String, Object>{})!.toJson(),
-          ),
+          getVm(),
           listViews,
           const FakeVmServiceRequest(
             method: 'streamListen',
@@ -980,7 +946,7 @@ void main() {
         contains(
           Event.hotRunnerInfo(
             label: 'exception',
-            targetPlatform: getNameForTargetPlatform(TargetPlatform.android_arm),
+            targetPlatform: TargetPlatform.android_arm.getName(),
             sdkName: 'Android',
             emulator: false,
             fullRestart: true,
@@ -988,7 +954,7 @@ void main() {
         ),
       );
       expect(fakeVmServiceHost?.hasRemainingExpectations, false);
-    }, overrides: <Type, Generator>{Usage: () => TestUsage()}),
+    }),
   );
 
   testUsingContext(
@@ -997,7 +963,7 @@ void main() {
       fakeVmServiceHost = FakeVmServiceHost(requests: <VmServiceExpectation>[]);
       expect(residentRunner.artifactDirectory.path, contains('flutter_tool.'));
 
-      final ResidentRunner otherRunner = HotRunner(
+      final ResidentRunner otherRunner = createHotRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.enabled(BuildInfo.debug),
@@ -1105,7 +1071,7 @@ flutter:
         dartPluginClass: PathProviderLinux
 ''');
 
-      residentRunner = HotRunner(
+      residentRunner = createHotRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.enabled(BuildInfo.debug),
@@ -1168,7 +1134,7 @@ flutter:
       fakeVmServiceHost = FakeVmServiceHost(requests: <VmServiceExpectation>[]);
       final residentCompiler = FakeResidentCompiler()
         ..nextOutput = const CompilerOutput('foo', 1, <Uri>[]);
-      residentRunner = HotRunner(
+      residentRunner = createHotRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.enabled(BuildInfo.debug),
@@ -1278,7 +1244,7 @@ flutter:
     'ResidentRunner printHelpDetails cold runner',
     () => testbed.run(() {
       fakeVmServiceHost = null;
-      residentRunner = ColdRunner(
+      residentRunner = createColdRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.disabled(BuildInfo.release),
@@ -1313,7 +1279,7 @@ flutter:
     'ResidentRunner printHelp cold runner',
     () => testbed.run(() {
       fakeVmServiceHost = null;
-      residentRunner = ColdRunner(
+      residentRunner = createColdRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.disabled(BuildInfo.release),
@@ -1348,12 +1314,12 @@ flutter:
     () => testbed.run(() async {
       final FlutterDevice flutterDevice = await FlutterDevice.create(
         FakeDevice(targetPlatform: TargetPlatform.web_javascript),
-        target: 'lib/main.dart',
+        toolContext: DelegatingToolContext(artifacts: Artifacts.test()),
         buildInfo: BuildInfo.profile,
-        platform: FakePlatform(),
+        target: 'lib/main.dart',
       );
 
-      final ResidentRunner residentRunner = HotRunner(
+      final ResidentRunner residentRunner = createHotRunner(
         <FlutterDevice>[flutterDevice],
         debuggingOptions: DebuggingOptions.disabled(BuildInfo.profile),
         target: 'lib/main.dart',
@@ -1373,7 +1339,7 @@ flutter:
     'ResidentRunner ignores DevtoolsLauncher when attaching with enableDevTools: false - cold mode',
     () => testbed.run(() async {
       fakeVmServiceHost = FakeVmServiceHost(requests: <VmServiceExpectation>[listViews, listViews]);
-      residentRunner = ColdRunner(
+      residentRunner = createColdRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.enabled(
@@ -1423,7 +1389,7 @@ flutter:
         wsAddress: testUri,
       );
       globals.fs.file(globals.fs.path.join('lib', 'main.dart')).createSync(recursive: true);
-      residentRunner = HotRunner(
+      residentRunner = createHotRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.enabled(BuildInfo.debug, vmserviceOutFile: 'foo'),
@@ -1446,7 +1412,7 @@ flutter:
         wsAddress: testUri,
       );
       globals.fs.file(globals.fs.path.join('lib', 'main.dart')).createSync(recursive: true);
-      residentRunner = HotRunner(
+      residentRunner = createHotRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.enabled(
@@ -1464,10 +1430,15 @@ flutter:
 
       await residentRunner.run();
 
-      expect(
-        await globals.fs.file(globals.fs.path.join('build', 'cache.dill')).readAsString(),
-        'ABC',
+      final String expectedPath = getDefaultCachedKernelPath(
+        fileSystem: globals.fs,
+        trackWidgetCreation: residentRunner.trackWidgetCreation,
+        dartDefines: residentRunner.debuggingOptions.buildInfo.dartDefines,
+        extraFrontEndOptions: residentRunner.debuggingOptions.buildInfo.extraFrontEndOptions,
+        config: globals.config,
+        targetModel: TargetModel.fromTargetPlatform(flutterDevice.targetPlatform),
       );
+      expect(await globals.fs.file(expectedPath).readAsString(), 'ABC');
     }),
   );
 
@@ -1479,7 +1450,7 @@ flutter:
         wsAddress: testUri,
       );
       globals.fs.file(globals.fs.path.join('lib', 'main.dart')).createSync(recursive: true);
-      residentRunner = HotRunner(
+      residentRunner = createHotRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.enabled(
@@ -1498,12 +1469,15 @@ flutter:
 
       await residentRunner.run();
 
-      expect(
-        await globals.fs
-            .file(globals.fs.path.join('build', '187ef4436122d1cc2f40dc2b92f0eba0.cache.dill'))
-            .readAsString(),
-        'ABC',
+      final String expectedPath = getDefaultCachedKernelPath(
+        fileSystem: globals.fs,
+        trackWidgetCreation: residentRunner.trackWidgetCreation,
+        dartDefines: residentRunner.debuggingOptions.buildInfo.dartDefines,
+        extraFrontEndOptions: residentRunner.debuggingOptions.buildInfo.extraFrontEndOptions,
+        config: globals.config,
+        targetModel: TargetModel.fromTargetPlatform(flutterDevice.targetPlatform),
       );
+      expect(await globals.fs.file(expectedPath).readAsString(), 'ABC');
     }),
   );
 
@@ -1515,7 +1489,7 @@ flutter:
         wsAddress: testUri,
       );
       globals.fs.file(globals.fs.path.join('lib', 'main.dart')).createSync(recursive: true);
-      residentRunner = HotRunner(
+      residentRunner = createHotRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.enabled(
@@ -1534,10 +1508,15 @@ flutter:
 
       await residentRunner.run();
 
-      expect(
-        await globals.fs.file(globals.fs.path.join('build', 'cache.dill')).readAsString(),
-        'ABC',
+      final String expectedPath = getDefaultCachedKernelPath(
+        fileSystem: globals.fs,
+        trackWidgetCreation: residentRunner.trackWidgetCreation,
+        dartDefines: residentRunner.debuggingOptions.buildInfo.dartDefines,
+        extraFrontEndOptions: residentRunner.debuggingOptions.buildInfo.extraFrontEndOptions,
+        config: globals.config,
+        targetModel: TargetModel.fromTargetPlatform(flutterDevice.targetPlatform),
       );
+      expect(await globals.fs.file(expectedPath).readAsString(), 'ABC');
     }),
   );
 
@@ -1549,7 +1528,7 @@ flutter:
         wsAddress: testUri,
       );
       globals.fs.file(globals.fs.path.join('lib', 'main.dart')).createSync(recursive: true);
-      residentRunner = HotRunner(
+      residentRunner = createHotRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.enabled(BuildInfo.debug),
@@ -1560,12 +1539,15 @@ flutter:
 
       await residentRunner.run();
 
-      expect(
-        await globals.fs
-            .file(globals.fs.path.join('build', 'cache.dill.track.dill'))
-            .readAsString(),
-        'ABC',
+      final String expectedPath = getDefaultCachedKernelPath(
+        fileSystem: globals.fs,
+        trackWidgetCreation: residentRunner.trackWidgetCreation,
+        dartDefines: residentRunner.debuggingOptions.buildInfo.dartDefines,
+        extraFrontEndOptions: residentRunner.debuggingOptions.buildInfo.extraFrontEndOptions,
+        config: globals.config,
+        targetModel: TargetModel.fromTargetPlatform(flutterDevice.targetPlatform),
       );
+      expect(await globals.fs.file(expectedPath).readAsString(), 'ABC');
     }),
   );
 
@@ -1577,7 +1559,7 @@ flutter:
         wsAddress: testUri,
       );
       globals.fs.file(globals.fs.path.join('lib', 'main.dart')).createSync(recursive: true);
-      residentRunner = HotRunner(
+      residentRunner = createHotRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         dillOutputPath: 'test',
@@ -1601,7 +1583,7 @@ flutter:
         wsAddress: testUri,
       );
       globals.fs.file(globals.fs.path.join('lib', 'main.dart')).createSync(recursive: true);
-      residentRunner = HotRunner(
+      residentRunner = createHotRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.enabled(
@@ -1620,12 +1602,15 @@ flutter:
 
       await residentRunner.run();
 
-      expect(
-        await globals.fs
-            .file(globals.fs.path.join('build', 'cache.dill.track.dill'))
-            .readAsString(),
-        'ABC',
+      final String expectedPath = getDefaultCachedKernelPath(
+        fileSystem: globals.fs,
+        trackWidgetCreation: residentRunner.trackWidgetCreation,
+        dartDefines: residentRunner.debuggingOptions.buildInfo.dartDefines,
+        extraFrontEndOptions: residentRunner.debuggingOptions.buildInfo.extraFrontEndOptions,
+        config: globals.config,
+        targetModel: TargetModel.fromTargetPlatform(flutterDevice.targetPlatform),
       );
+      expect(await globals.fs.file(expectedPath).readAsString(), 'ABC');
     }),
   );
 
@@ -1637,7 +1622,7 @@ flutter:
         wsAddress: testUri,
       );
       globals.fs.file(globals.fs.path.join('lib', 'main.dart')).createSync(recursive: true);
-      residentRunner = HotRunner(
+      residentRunner = createHotRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.enabled(BuildInfo.debug),
@@ -1658,7 +1643,7 @@ flutter:
           requests: <VmServiceExpectation>[listViews, listViews],
         );
         globals.fs.file(globals.fs.path.join('lib', 'main.dart')).createSync(recursive: true);
-        residentRunner = HotRunner(
+        residentRunner = createHotRunner(
           <FlutterDevice>[flutterDevice],
           stayResident: false,
           debuggingOptions: DebuggingOptions.enabled(BuildInfo.debug, vmserviceOutFile: 'foo'),
@@ -1685,7 +1670,7 @@ flutter:
         wsAddress: testUri,
       );
       globals.fs.file(globals.fs.path.join('lib', 'main.dart')).createSync(recursive: true);
-      residentRunner = ColdRunner(
+      residentRunner = createColdRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.enabled(BuildInfo.profile, vmserviceOutFile: 'foo'),
@@ -1707,6 +1692,7 @@ flutter:
       final residentCompiler =
           (await FlutterDevice.create(
                 device,
+                toolContext: const DelegatingToolContext(),
                 buildInfo: const BuildInfo(
                   BuildMode.debug,
                   '',
@@ -1714,63 +1700,18 @@ flutter:
                   packageConfigPath: '.dart_tool/package_config.json',
                 ),
                 target: null,
-                platform: FakePlatform(),
               )).generator
               as DefaultResidentCompiler?;
 
-      expect(
-        residentCompiler!.initializeFromDill,
-        globals.fs.path.join(getBuildDirectory(), 'cache.dill'),
+      final String expectedPath = getDefaultCachedKernelPath(
+        fileSystem: globals.fs,
+        trackWidgetCreation: false,
+        dartDefines: const <String>[],
+        config: globals.config,
+        targetModel: TargetModel.dartdevc,
+        extraFrontEndOptions: kDdcLibraryBundleFlags,
       );
-      expect(
-        residentCompiler.librariesSpec,
-        globals.fs
-            .file(globals.artifacts!.getHostArtifact(HostArtifact.flutterWebLibrariesJson))
-            .uri
-            .toString(),
-      );
-      expect(residentCompiler.targetModel, TargetModel.dartdevc);
-      expect(
-        residentCompiler.sdkRoot,
-        '${globals.artifacts!.getHostArtifact(HostArtifact.flutterWebSdk).path}/',
-      );
-      expect(
-        residentCompiler.platformDill,
-        'file:///HostArtifact.webPlatformKernelFolder/ddc_outline.dill',
-      );
-    },
-    overrides: <Type, Generator>{
-      Artifacts: () => Artifacts.test(),
-      FileSystem: () => MemoryFileSystem.test(),
-      ProcessManager: () => FakeProcessManager.any(),
-    },
-  );
-
-  testUsingContext(
-    'FlutterDevice uses dartdevc configuration when targeting web with null-safety autodetected',
-    () async {
-      fakeVmServiceHost = FakeVmServiceHost(requests: <VmServiceExpectation>[]);
-      final device = FakeDevice(targetPlatform: TargetPlatform.web_javascript);
-
-      final residentCompiler =
-          (await FlutterDevice.create(
-                device,
-                buildInfo: const BuildInfo(
-                  BuildMode.debug,
-                  '',
-                  treeShakeIcons: false,
-                  extraFrontEndOptions: <String>['--enable-experiment=non-nullable'],
-                  packageConfigPath: '.dart_tool/package_config.json',
-                ),
-                target: null,
-                platform: FakePlatform(),
-              )).generator
-              as DefaultResidentCompiler?;
-
-      expect(
-        residentCompiler!.initializeFromDill,
-        globals.fs.path.join(getBuildDirectory(), 'cache.dill'),
-      );
+      expect(residentCompiler!.initializeFromDill, expectedPath);
       expect(
         residentCompiler.librariesSpec,
         globals.fs
@@ -1804,6 +1745,7 @@ flutter:
       final residentCompiler =
           (await FlutterDevice.create(
                 device,
+                toolContext: const DelegatingToolContext(),
                 buildInfo: const BuildInfo(
                   BuildMode.debug,
                   '',
@@ -1812,7 +1754,6 @@ flutter:
                   packageConfigPath: '.dart_tool/package_config.json',
                 ),
                 target: null,
-                platform: FakePlatform(),
               )).generator
               as DefaultResidentCompiler?;
 
@@ -1837,6 +1778,7 @@ flutter:
       final residentCompiler =
           (await FlutterDevice.create(
                 device,
+                toolContext: const DelegatingToolContext(),
                 buildInfo: const BuildInfo(
                   BuildMode.debug,
                   '',
@@ -1846,7 +1788,6 @@ flutter:
                   packageConfigPath: '.dart_tool/package_config.json',
                 ),
                 target: null,
-                platform: FakePlatform(),
               )).generator
               as DefaultResidentCompiler?;
 
@@ -1869,6 +1810,7 @@ flutter:
       final residentCompiler =
           (await FlutterDevice.create(
                 device,
+                toolContext: const DelegatingToolContext(),
                 buildInfo: const BuildInfo(
                   BuildMode.debug,
                   '',
@@ -1878,7 +1820,6 @@ flutter:
                   packageConfigPath: '.dart_tool/package_config.json',
                 ),
                 target: null,
-                platform: FakePlatform(),
               )).generator
               as DefaultResidentCompiler?;
 
@@ -1900,6 +1841,7 @@ flutter:
       final residentCompiler =
           (await FlutterDevice.create(
                 device,
+                toolContext: const DelegatingToolContext(),
                 buildInfo: const BuildInfo(
                   BuildMode.debug,
                   '',
@@ -1908,7 +1850,6 @@ flutter:
                   packageConfigPath: '.dart_tool/package_config.json',
                 ),
                 target: null,
-                platform: FakePlatform(),
               )).generator
               as DefaultResidentCompiler?;
 
@@ -1945,12 +1886,15 @@ flutter:
                 ddsUri: Uri.parse('http://localhost/existingDdsInField'),
               );
             };
-        final flutterDevice = TestFlutterDevice(device, vmServiceUris: Stream<Uri>.value(testUri));
+        final flutterDevice = TestFlutterDevice(device, vmServiceUri: Future<Uri>.value(testUri));
         final done = Completer<void>();
         unawaited(
           runZonedGuarded(
             () => flutterDevice
-                .connect(debuggingOptions: DebuggingOptions.enabled(BuildInfo.debug))
+                .connect(
+                  vmServiceUri: testUri,
+                  debuggingOptions: DebuggingOptions.enabled(BuildInfo.debug),
+                )
                 .then((_) => done.complete()),
             (_, _) => done.complete(),
           ),
@@ -1966,6 +1910,7 @@ flutter:
               Restart? restart,
               CompileExpression? compileExpression,
               FlutterProject? flutterProject,
+              FlutterVersion? flutterVersion,
               PrintStructuredErrorLogMethod? printStructuredErrorLogMethod,
               io.CompressionOptions? compression,
               Device? device,
@@ -2019,8 +1964,9 @@ flutter:
               done.complete();
               return FakeDartDevelopmentServiceLauncher(uri: remoteVmServiceUri);
             };
-        final flutterDevice = TestFlutterDevice(device, vmServiceUris: Stream<Uri>.value(testUri));
+        final flutterDevice = TestFlutterDevice(device, vmServiceUri: Future<Uri>.value(testUri));
         await flutterDevice.connect(
+          vmServiceUri: testUri,
           debuggingOptions: DebuggingOptions.enabled(
             BuildInfo.debug,
             disableServiceAuthCodes: true,
@@ -2037,6 +1983,7 @@ flutter:
               Restart? restart,
               CompileExpression? compileExpression,
               FlutterProject? flutterProject,
+              FlutterVersion? flutterVersion,
               PrintStructuredErrorLogMethod? printStructuredErrorLogMethod,
               io.CompressionOptions? compression,
               Device? device,
@@ -2062,7 +2009,7 @@ flutter:
       fakeVmServiceHost = FakeVmServiceHost(
         requests: <VmServiceExpectation>[listViews, setAssetBundlePath, evict],
       );
-      residentRunner = HotRunner(
+      residentRunner = createHotRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.enabled(BuildInfo.debug),
@@ -2085,7 +2032,7 @@ flutter:
       fakeVmServiceHost = FakeVmServiceHost(
         requests: <VmServiceExpectation>[listViews, setAssetBundlePath, evictShader],
       );
-      residentRunner = HotRunner(
+      residentRunner = createHotRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.enabled(BuildInfo.debug),
@@ -2103,10 +2050,67 @@ flutter:
   );
 
   testUsingContext(
+    'HotRunner reinitializes Flutter GPU shader libraries for changed .shaderbundle assets',
+    () => testbed.run(() async {
+      fakeVmServiceHost = FakeVmServiceHost(
+        requests: <VmServiceExpectation>[listViews, setAssetBundlePath, reinitializeShaderLibrary],
+      );
+      residentRunner = createHotRunner(
+        <FlutterDevice>[flutterDevice],
+        stayResident: false,
+        debuggingOptions: DebuggingOptions.enabled(BuildInfo.debug),
+        target: 'main.dart',
+        analytics: fakeAnalytics,
+      );
+
+      // A `.shaderbundle` asset reloads the compiled Flutter GPU ShaderLibrary
+      // instead of going through the generic asset eviction.
+      (flutterDevice.devFS! as FakeDevFS).assetPathsToEvict = <String>{'foo.shaderbundle'};
+
+      await (residentRunner as HotRunner).evictDirtyAssets();
+      expect(fakeVmServiceHost!.hasRemainingExpectations, false);
+    }),
+  );
+
+  testUsingContext(
+    'HotRunner evicts a changed .shaderbundle asset generically on web',
+    () => testbed.run(() async {
+      final webFlutterDevice = FakeFlutterDevice()
+        ..vmServiceHost = (() => fakeVmServiceHost)
+        ..fakeDevFS = devFS
+        ..targetPlatform = TargetPlatform.web_javascript;
+      fakeVmServiceHost = FakeVmServiceHost(
+        requests: <VmServiceExpectation>[
+          listViews,
+          setAssetBundlePath,
+          const FakeVmServiceRequest(
+            method: 'ext.flutter.evict',
+            args: <String, Object>{'value': 'foo.shaderbundle', 'isolateId': '1'},
+          ),
+        ],
+      );
+      residentRunner = createHotRunner(
+        <FlutterDevice>[webFlutterDevice],
+        stayResident: false,
+        debuggingOptions: DebuggingOptions.enabled(BuildInfo.debug),
+        target: 'main.dart',
+        analytics: fakeAnalytics,
+      );
+
+      // The Flutter GPU reload extension is unavailable on web, so the bundle
+      // falls back to the generic asset eviction.
+      (webFlutterDevice.devFS! as FakeDevFS).assetPathsToEvict = <String>{'foo.shaderbundle'};
+
+      await (residentRunner as HotRunner).evictDirtyAssets();
+      expect(fakeVmServiceHost!.hasRemainingExpectations, false);
+    }),
+  );
+
+  testUsingContext(
     'HotRunner does not sets asset directory when no assets to evict',
     () => testbed.run(() async {
       fakeVmServiceHost = FakeVmServiceHost(requests: <VmServiceExpectation>[]);
-      residentRunner = HotRunner(
+      residentRunner = createHotRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.enabled(BuildInfo.debug),
@@ -2125,7 +2129,7 @@ flutter:
     'HotRunner does not set asset directory if it has been set before',
     () => testbed.run(() async {
       fakeVmServiceHost = FakeVmServiceHost(requests: <VmServiceExpectation>[listViews, evict]);
-      residentRunner = HotRunner(
+      residentRunner = createHotRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.enabled(BuildInfo.debug),
@@ -2139,6 +2143,48 @@ flutter:
       await (residentRunner as HotRunner).evictDirtyAssets();
       expect(flutterDevice.devFS!.hasSetAssetDirectory, true);
       expect(fakeVmServiceHost!.hasRemainingExpectations, false);
+    }),
+  );
+
+  testUsingContext(
+    'HotRunner evictDirtyAssets correctly finds UI isolate and view ID when multiple views are present and the first view has no isolate',
+    () => testbed.run(() async {
+      final viewWithoutIsolate = FlutterView(id: 'view_empty', uiIsolate: null);
+      final viewWithIsolate = FlutterView(id: 'view_active', uiIsolate: fakeUnpausedIsolate);
+
+      final listMultipleViews = FakeVmServiceRequest(
+        method: kListViewsMethod,
+        jsonResponse: <String, Object>{
+          'views': <Object>[viewWithoutIsolate.toJson(), viewWithIsolate.toJson()],
+        },
+      );
+
+      const setAssetBundlePathForActiveView = FakeVmServiceRequest(
+        method: '_flutter.setAssetBundlePath',
+        args: <String, Object>{
+          'viewId': 'view_active',
+          'assetDirectory': 'build/flutter_assets',
+          'isolateId': '1',
+        },
+      );
+
+      fakeVmServiceHost = FakeVmServiceHost(
+        requests: <VmServiceExpectation>[listMultipleViews, setAssetBundlePathForActiveView, evict],
+      );
+      residentRunner = createHotRunner(
+        <FlutterDevice>[flutterDevice],
+        stayResident: false,
+        debuggingOptions: DebuggingOptions.enabled(BuildInfo.debug),
+        target: 'main.dart',
+        analytics: fakeAnalytics,
+      );
+
+      (flutterDevice.devFS! as FakeDevFS).assetPathsToEvict = <String>{'asset'};
+
+      expect(flutterDevice.devFS!.hasSetAssetDirectory, isFalse);
+      await (residentRunner as HotRunner).evictDirtyAssets();
+      expect(flutterDevice.devFS!.hasSetAssetDirectory, isTrue);
+      expect(fakeVmServiceHost!.hasRemainingExpectations, isFalse);
     }),
   );
 
@@ -2157,7 +2203,7 @@ flutter:
 
       fakeVmServiceHost = FakeVmServiceHost(requests: <VmServiceExpectation>[listViews, listViews]);
       globals.fs.file(globals.fs.path.join('lib', 'main.dart')).createSync(recursive: true);
-      residentRunner = HotRunner(
+      residentRunner = createHotRunner(
         <FlutterDevice>[flutterDevice],
         stayResident: false,
         debuggingOptions: DebuggingOptions.enabled(
@@ -2185,4 +2231,138 @@ flutter:
       FeatureFlags: () => TestFeatureFlags(isNativeAssetsEnabled: true, isMacOSEnabled: true),
     },
   );
+
+  testUsingContext(
+    'ResidentRunner delays on connection failure to allow logs to flush',
+    () => testbed.run(() async {
+      flutterDevice.connectError = Exception('Failed to connect');
+      flutterDevice.logFlushDelay = const Duration(milliseconds: 100);
+
+      final stopwatch = Stopwatch()..start();
+      final int result = await residentRunner.attach();
+      stopwatch.stop();
+
+      expect(result, 2);
+      expect(stopwatch.elapsedMilliseconds, greaterThanOrEqualTo(100));
+    }),
+  );
+  group('ResidentRunner cached Initial Dill Compilation', () {
+    late TestBed testbed;
+    late FakeFlutterDevice flutterDevice;
+    late FakeDevFS devFS;
+    late TestHotRunner residentRunner;
+    late FakeDevice device;
+
+    setUp(() {
+      testbed = TestBed(
+        setup: () {
+          residentRunner = TestHotRunner(
+            <FlutterDevice>[flutterDevice],
+            buildSystem: TestBuildSystem.all(BuildResult(success: true)),
+            buildTargets: const BuildTargetsImpl(),
+            stayResident: false,
+            debuggingOptions: DebuggingOptions.enabled(BuildInfo.debug),
+            target: 'main.dart',
+            toolContext: const DelegatingToolContext(),
+            xcode: null,
+            analytics: fakeAnalytics,
+          );
+          // Write the source dill file
+          globals.fs.file(residentRunner.dillOutputPath)
+            ..createSync(recursive: true)
+            ..writeAsStringSync('ABC');
+        },
+        overrides: <Type, Generator>{
+          Analytics: () => getInitializedFakeAnalyticsInstance(
+            fakeFlutterVersion: FakeFlutterVersion(),
+            fs: MemoryFileSystem.test(),
+          ),
+        },
+      );
+      device = FakeDevice();
+      devFS = FakeDevFS();
+      flutterDevice = FakeFlutterDevice()
+        ..testUri = testUri
+        ..device = device
+        ..fakeDevFS = devFS;
+    });
+
+    testUsingContext(
+      'correctly caches Web Device compilation',
+      () => testbed.run(() {
+        flutterDevice.targetPlatform = TargetPlatform.web_javascript;
+        residentRunner.testCacheInitialDillCompilation();
+
+        final String expectedPath = getDefaultCachedKernelPath(
+          fileSystem: globals.fs,
+          trackWidgetCreation: residentRunner.trackWidgetCreation,
+          dartDefines: residentRunner.debuggingOptions.buildInfo.dartDefines,
+          extraFrontEndOptions: kDdcLibraryBundleFlags,
+          config: globals.config,
+          targetModel: TargetModel.dartdevc,
+        );
+
+        expect(globals.fs.file(expectedPath), exists);
+        expect(globals.fs.file(expectedPath).readAsStringSync(), 'ABC');
+      }),
+    );
+
+    testUsingContext(
+      'correctly caches Fuchsia Device compilation',
+      () => testbed.run(() {
+        flutterDevice.targetPlatform = TargetPlatform.fuchsia_arm64;
+        residentRunner.testCacheInitialDillCompilation();
+
+        final String expectedPath = getDefaultCachedKernelPath(
+          fileSystem: globals.fs,
+          trackWidgetCreation: residentRunner.trackWidgetCreation,
+          dartDefines: residentRunner.debuggingOptions.buildInfo.dartDefines,
+          extraFrontEndOptions: residentRunner.debuggingOptions.buildInfo.extraFrontEndOptions,
+          config: globals.config,
+          targetModel: TargetModel.flutterRunner,
+        );
+
+        expect(globals.fs.file(expectedPath), exists);
+        expect(globals.fs.file(expectedPath).readAsStringSync(), 'ABC');
+      }),
+    );
+
+    testUsingContext(
+      'correctly caches Android Device compilation',
+      () => testbed.run(() {
+        flutterDevice.targetPlatform = TargetPlatform.android_arm;
+        residentRunner.testCacheInitialDillCompilation();
+
+        final String expectedPath = getDefaultCachedKernelPath(
+          fileSystem: globals.fs,
+          trackWidgetCreation: residentRunner.trackWidgetCreation,
+          dartDefines: residentRunner.debuggingOptions.buildInfo.dartDefines,
+          extraFrontEndOptions: residentRunner.debuggingOptions.buildInfo.extraFrontEndOptions,
+          config: globals.config,
+          targetModel: TargetModel.flutter,
+        );
+
+        expect(globals.fs.file(expectedPath), exists);
+        expect(globals.fs.file(expectedPath).readAsStringSync(), 'ABC');
+      }),
+    );
+  });
+}
+
+class TestHotRunner extends HotRunner {
+  TestHotRunner(
+    super.flutterDevices, {
+    required super.buildSystem,
+    required super.buildTargets,
+    required super.stayResident,
+    required super.debuggingOptions,
+    required super.target,
+    required super.toolContext,
+    required super.xcode,
+    required super.analytics,
+  });
+
+  void testCacheInitialDillCompilation() {
+    cacheInitialDillCompilation();
+  }
 }

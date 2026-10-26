@@ -35,6 +35,11 @@ void PlatformView::DispatchPointerDataPacket(
   delegate_.OnPlatformViewDispatchPointerDataPacket(std::move(packet));
 }
 
+HitTestResponse PlatformView::HitTest(int64_t view_id,
+                                      const flutter::PointData offset) {
+  return delegate_.OnPlatformViewHitTest(view_id, offset);
+}
+
 void PlatformView::DispatchSemanticsAction(int64_t view_id,
                                            int32_t node_id,
                                            SemanticsAction action,
@@ -113,12 +118,6 @@ std::shared_ptr<impeller::Context> PlatformView::GetImpellerContext() const {
 }
 
 void PlatformView::ReleaseResourceContext() const {}
-
-PointerDataDispatcherMaker PlatformView::GetDispatcherMaker() {
-  return [](DefaultPointerDataDispatcher::Delegate& delegate) {
-    return std::make_unique<DefaultPointerDataDispatcher>(delegate);
-  };
-}
 
 fml::WeakPtr<PlatformView> PlatformView::GetWeakPtr() const {
   return weak_factory_.GetWeakPtr();

@@ -13,6 +13,7 @@ import '../../dart/package_map.dart';
 import '../../devfs.dart';
 import '../../flutter_manifest.dart';
 import '../../isolated/native_assets/dart_hook_result.dart';
+import '../../project.dart';
 import '../build_system.dart';
 import '../depfile.dart';
 import '../exceptions.dart';
@@ -86,6 +87,7 @@ Future<Depfile> copyAssets(
     logger: environment.logger,
     fileSystem: environment.fileSystem,
     artifacts: environment.artifacts,
+    platform: environment.platform,
   );
   final assetTransformer = AssetTransformer(
     processManager: environment.processManager,
@@ -135,7 +137,7 @@ Future<Depfile> copyAssets(
             case AssetKind.regular:
               if (entry.value.transformers.isNotEmpty) {
                 transformResource = await transformPool.request();
-                final AssetTransformationFailure? failure = await assetTransformer.transformAsset(
+                final AssetTransformationResult result = await assetTransformer.transformAsset(
                   asset: content.file as File,
                   outputPath: file.path,
                   workingDirectory: environment.projectDir.path,
@@ -143,12 +145,13 @@ Future<Depfile> copyAssets(
                   logger: environment.logger,
                 );
                 doCopy = false;
-                if (failure != null) {
+                if (result.failure != null) {
                   throwToolExit(
                     'User-defined transformation of asset "${entry.key}" failed.\n'
-                    '${failure.message}',
+                    '${result.failure!.message}',
                   );
                 }
+                inputs.addAll(result.dependencies);
               }
             case AssetKind.font:
               doCopy = !await iconTreeShaker.subsetFont(
@@ -162,19 +165,20 @@ Future<Depfile> copyAssets(
               if (entry.value.transformers.isNotEmpty) {
                 transformResource = await transformPool.request();
                 final transformedShaderSourcePath = '${file.path}.transformed';
-                final AssetTransformationFailure? failure = await assetTransformer.transformAsset(
+                final AssetTransformationResult result = await assetTransformer.transformAsset(
                   asset: inputToCompiler,
                   outputPath: transformedShaderSourcePath,
                   workingDirectory: environment.projectDir.path,
                   transformerEntries: entry.value.transformers,
                   logger: environment.logger,
                 );
-                if (failure != null) {
+                if (result.failure != null) {
                   throwToolExit(
                     'User-defined transformation of shader "${entry.key}" failed.\n'
-                    '${failure.message}',
+                    '${result.failure!.message}',
                   );
                 }
+                inputs.addAll(result.dependencies);
                 inputToCompiler = environment.fileSystem.file(transformedShaderSourcePath);
               }
 
@@ -205,8 +209,8 @@ Future<Depfile> copyAssets(
       assetBundle.deferredComponentsEntries.entries.map<Future<void>>((
         MapEntry<String, Map<String, AssetBundleEntry>> componentEntries,
       ) async {
-        final Directory componentOutputDir = environment.projectDir
-            .childDirectory('build')
+        final Directory componentOutputDir = FlutterProject.fromDirectory(environment.projectDir)
+            .buildDirectory
             .childDirectory(componentEntries.key)
             .childDirectory('intermediates')
             .childDirectory('flutter');
@@ -272,14 +276,14 @@ class CopyAssets extends Target {
   String get name => 'copy_assets';
 
   @override
-  List<Target> get dependencies => const <Target>[DartBuildForNative(), KernelSnapshot()];
+  List<Target> get dependencies => const <Target>[LinkHooks(), KernelSnapshot()];
 
   @override
   List<Source> get inputs => const <Source>[
     Source.pattern(
       '{FLUTTER_ROOT}/packages/flutter_tools/lib/src/build_system/targets/assets.dart',
     ),
-    Source.pattern('{BUILD_DIR}/${DartBuild.dartHookResultFilename}'),
+    Source.pattern('{BUILD_DIR}/${LinkHooks.resultFilename}'),
     ...IconTreeShaker.inputs,
     ...ShaderCompiler.inputs,
   ];
@@ -302,7 +306,7 @@ class CopyAssets extends Target {
     final buildMode = BuildMode.fromCliName(buildModeEnvironment);
     final Directory output = environment.buildDir.childDirectory('flutter_assets');
     output.createSync(recursive: true);
-    final DartHooksResult dartHookResult = await DartBuild.loadHookResult(environment);
+    final DartHooksResult dartHookResult = await LinkHooks.loadHookResult(environment);
     final Depfile depfile = await copyAssets(
       environment,
       output,

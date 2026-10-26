@@ -4,15 +4,11 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_driver/driver_extension.dart';
+
+import 'drag.dart';
+import 'reorderable_list_semantics.dart';
 
 void main() {
-  // enableFlutterDriverExtension() will disable keyboard,
-  // which is required for flutter_driver tests
-  // But breaks the XCUITests
-  if (const bool.fromEnvironment('ENABLE_DRIVER_EXTENSION')) {
-    enableFlutterDriverExtension();
-  }
   runApp(const MyApp());
 }
 
@@ -48,24 +44,6 @@ class _MyHomePageState extends State<MyHomePage> {
       appBar: AppBar(title: Text(widget.title ?? '')),
       body: Column(
         children: <Widget>[
-          TextButton(
-            key: const ValueKey<String>('platform_view_button'),
-            child: const Text('show platform view'),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute<MergeThreadTestPage>(
-                  builder: (BuildContext context) => const MergeThreadTestPage(),
-                ),
-              );
-            },
-          ),
-          // Push this button to perform an animation, which ensure the threads are unmerged after the animation.
-          ElevatedButton(
-            key: const ValueKey<String>('unmerge_button'),
-            child: const Text('Tap to unmerge threads'),
-            onPressed: () {},
-          ),
           TextButton(
             key: const ValueKey<String>('platform_view_focus_test'),
             child: const Text('platform view focus test'),
@@ -103,6 +81,19 @@ class _MyHomePageState extends State<MyHomePage> {
             },
           ),
           TextButton(
+            key: const ValueKey<String>('drawing_web_view_behind_context_menu_test'),
+            child: const Text('drawing web view behind context menu test'),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute<DrawingWebViewBehindContextMenuTestPage>(
+                  builder: (BuildContext context) =>
+                      const DrawingWebViewBehindContextMenuTestPage(),
+                ),
+              );
+            },
+          ),
+          TextButton(
             key: const ValueKey<String>('admob_banner_in_scrollable_list_test'),
             child: const Text('admob banner in scrollable list test'),
             onPressed: () {
@@ -114,28 +105,28 @@ class _MyHomePageState extends State<MyHomePage> {
               );
             },
           ),
-        ],
-      ),
-    );
-  }
-}
-
-/// A page to test thread merge for platform view.
-class MergeThreadTestPage extends StatelessWidget {
-  const MergeThreadTestPage({super.key});
-
-  static Key button = const ValueKey<String>('plus_button');
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Platform View Thread Merge Tests')),
-      body: Column(
-        children: <Widget>[
-          const Expanded(
-            child: SizedBox(width: 300, child: UiKitView(viewType: 'platform_view')),
+          TextButton(
+            child: const Text('reorderable list semantics test'),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute<ReorderableListSemanticsScreen>(
+                  builder: (BuildContext context) => const ReorderableListSemanticsScreen(),
+                ),
+              );
+            },
           ),
-          ElevatedButton(key: button, child: const Text('button'), onPressed: () {}),
+          TextButton(
+            child: const Text('drag test'),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute<DragScreen>(
+                  builder: (BuildContext context) => const DragScreen(),
+                ),
+              );
+            },
+          ),
         ],
       ),
     );
@@ -274,6 +265,52 @@ class _WebViewBehindContextMenuTestPageState extends State<WebViewBehindContextM
           dimension: 500.0,
           child: UiKitView(
             viewType: 'platform_web_view',
+            creationParamsCodec: StandardMessageCodec(),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A page to test a web view with drawing website cannot be drawn when a context menu is shown.
+/// See [this issue](https://github.com/flutter/flutter/issues/179916).
+class DrawingWebViewBehindContextMenuTestPage extends StatefulWidget {
+  const DrawingWebViewBehindContextMenuTestPage({super.key});
+
+  @override
+  State<DrawingWebViewBehindContextMenuTestPage> createState() =>
+      _DrawingWebViewBehindContextMenuTestPageState();
+}
+
+class _DrawingWebViewBehindContextMenuTestPageState
+    extends State<DrawingWebViewBehindContextMenuTestPage> {
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Drawing web view behind context menu test'),
+        actions: <Widget>[
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert),
+            onSelected: (String value) {},
+            itemBuilder: (BuildContext context) {
+              return <PopupMenuEntry<String>>[
+                const PopupMenuItem<String>(value: 'button 1', child: Text('menu button 1')),
+                const PopupMenuItem<String>(value: 'button 2', child: Text('menu button 2')),
+                const PopupMenuItem<String>(value: 'button 3', child: Text('menu button 3')),
+                const PopupMenuItem<String>(value: 'button 4', child: Text('menu button 4')),
+                const PopupMenuItem<String>(value: 'button 5', child: Text('menu button 5')),
+              ];
+            },
+          ),
+        ],
+      ),
+      body: const Center(
+        child: SizedBox.square(
+          dimension: 500.0,
+          child: UiKitView(
+            viewType: 'platform_drawing_web_view',
             creationParamsCodec: StandardMessageCodec(),
           ),
         ),

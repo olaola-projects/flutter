@@ -89,95 +89,86 @@ void main() {
     expect(renderObject.debugNeedsPaint, isTrue);
   });
 
-  testWidgets(
-    'CupertinoDatePicker reset cache upon system fonts change - date time mode',
-    (WidgetTester tester) async {
-      await tester.pumpWidget(
-        CupertinoApp(home: CupertinoDatePicker(onDateTimeChanged: (DateTime dateTime) {})),
-      );
-      final dynamic state = tester.state(find.byType(CupertinoDatePicker));
-      // ignore: avoid_dynamic_calls
-      final cache = state.estimatedColumnWidths as Map<int, double>;
-      expect(cache.isNotEmpty, isTrue);
-      const data = <String, dynamic>{'type': 'fontsChange'};
-      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
-        'flutter/system',
-        SystemChannels.system.codec.encodeMessage(data),
-        (ByteData? data) {},
-      );
-      // Cache should be cleaned.
-      expect(cache.isEmpty, isTrue);
-      final Element element = tester.element(find.byType(CupertinoDatePicker));
-      expect(element.dirty, isTrue);
-    },
-    // TODO(yjbanov): cupertino does not work on the Web yet: https://github.com/flutter/flutter/issues/41920
-    skip: isBrowser,
-  );
+  testWidgets('CupertinoDatePicker reset cache upon system fonts change - date time mode', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      CupertinoApp(home: CupertinoDatePicker(onDateTimeChanged: (DateTime dateTime) {})),
+    );
+    final dynamic state = tester.state(find.byType(CupertinoDatePicker));
+    // ignore: avoid_dynamic_calls
+    final cache = state.estimatedColumnWidths as Map<int, double>;
+    expect(cache.isNotEmpty, isTrue);
+    const data = <String, dynamic>{'type': 'fontsChange'};
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      'flutter/system',
+      SystemChannels.system.codec.encodeMessage(data),
+      (ByteData? data) {},
+    );
+    // Cache should be cleaned.
+    expect(cache.isEmpty, isTrue);
+    final Element element = tester.element(find.byType(CupertinoDatePicker));
+    expect(element.dirty, isTrue);
+  });
 
-  testWidgets(
-    'CupertinoDatePicker reset cache upon system fonts change - date mode',
-    (WidgetTester tester) async {
-      await tester.pumpWidget(
-        CupertinoApp(
-          home: CupertinoDatePicker(
-            mode: CupertinoDatePickerMode.date,
-            onDateTimeChanged: (DateTime dateTime) {},
-          ),
+  testWidgets('CupertinoDatePicker reset cache upon system fonts change - date mode', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      CupertinoApp(
+        home: CupertinoDatePicker(
+          mode: CupertinoDatePickerMode.date,
+          onDateTimeChanged: (DateTime dateTime) {},
         ),
-      );
-      final dynamic state = tester.state(find.byType(CupertinoDatePicker));
-      // ignore: avoid_dynamic_calls
-      final cache = state.estimatedColumnWidths as Map<int, double>;
-      // Simulates font missing.
-      cache.clear();
-      const data = <String, dynamic>{'type': 'fontsChange'};
-      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
-        'flutter/system',
-        SystemChannels.system.codec.encodeMessage(data),
-        (ByteData? data) {},
-      );
-      // Cache should be replenished
-      expect(cache.isNotEmpty, isTrue);
-      final Element element = tester.element(find.byType(CupertinoDatePicker));
-      expect(element.dirty, isTrue);
-    },
-    // TODO(yjbanov): cupertino does not work on the Web yet: https://github.com/flutter/flutter/issues/41920
-    skip: isBrowser,
-  );
+      ),
+    );
+    final dynamic state = tester.state(find.byType(CupertinoDatePicker));
+    // ignore: avoid_dynamic_calls
+    final cache = state.estimatedColumnWidths as Map<int, double>;
+    // Simulates font missing.
+    cache.clear();
+    const data = <String, dynamic>{'type': 'fontsChange'};
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      'flutter/system',
+      SystemChannels.system.codec.encodeMessage(data),
+      (ByteData? data) {},
+    );
+    // Cache should be replenished
+    expect(cache.isNotEmpty, isTrue);
+    final Element element = tester.element(find.byType(CupertinoDatePicker));
+    expect(element.dirty, isTrue);
+  });
 
-  testWidgets(
-    'CupertinoDatePicker reset cache upon system fonts change - time mode',
-    (WidgetTester tester) async {
-      await tester.pumpWidget(
-        CupertinoApp(home: CupertinoTimerPicker(onTimerDurationChanged: (Duration d) {})),
-      );
-      final dynamic state = tester.state(find.byType(CupertinoTimerPicker));
-      // Simulates wrong metrics due to font missing.
-      // ignore: avoid_dynamic_calls
-      state.numberLabelWidth = 0.0;
-      // ignore: avoid_dynamic_calls
-      state.numberLabelHeight = 0.0;
-      // ignore: avoid_dynamic_calls
-      state.numberLabelBaseline = 0.0;
-      const data = <String, dynamic>{'type': 'fontsChange'};
-      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
-        'flutter/system',
-        SystemChannels.system.codec.encodeMessage(data),
-        (ByteData? data) {},
-      );
-      // Metrics should be refreshed
-      // ignore: avoid_dynamic_calls
-      expect(state.numberLabelWidth, lessThan(46.0 + precisionErrorTolerance));
-      // ignore: avoid_dynamic_calls
-      expect(state.numberLabelHeight, lessThan(23.0 + precisionErrorTolerance));
-      // ignore: avoid_dynamic_calls
-      expect(state.numberLabelBaseline, lessThan(18.400070190429688 + precisionErrorTolerance));
-      final Element element = tester.element(find.byType(CupertinoTimerPicker));
-      expect(element.dirty, isTrue);
-    },
-    // TODO(yjbanov): cupertino does not work on the Web yet: https://github.com/flutter/flutter/issues/41920
-    skip: isBrowser,
-  );
+  testWidgets('CupertinoDatePicker reset cache upon system fonts change - time mode', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      CupertinoApp(home: CupertinoTimerPicker(onTimerDurationChanged: (Duration d) {})),
+    );
+    final dynamic state = tester.state(find.byType(CupertinoTimerPicker));
+    // Simulates wrong metrics due to font missing.
+    // ignore: avoid_dynamic_calls
+    state.numberLabelWidth = 0.0;
+    // ignore: avoid_dynamic_calls
+    state.numberLabelHeight = 0.0;
+    // ignore: avoid_dynamic_calls
+    state.numberLabelBaseline = 0.0;
+    const data = <String, dynamic>{'type': 'fontsChange'};
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      'flutter/system',
+      SystemChannels.system.codec.encodeMessage(data),
+      (ByteData? data) {},
+    );
+    // Metrics should be refreshed
+    // ignore: avoid_dynamic_calls
+    expect(state.numberLabelWidth, lessThan(46.0 + precisionErrorTolerance));
+    // ignore: avoid_dynamic_calls
+    expect(state.numberLabelHeight, lessThan(23.0 + precisionErrorTolerance));
+    // ignore: avoid_dynamic_calls
+    expect(state.numberLabelBaseline, lessThan(18.400070190429688 + precisionErrorTolerance));
+    final Element element = tester.element(find.byType(CupertinoTimerPicker));
+    expect(element.dirty, isTrue);
+  });
 
   testWidgets('RangeSlider relayout upon system fonts changes more than once', (
     WidgetTester tester,
@@ -218,6 +209,37 @@ void main() {
         )
         .first;
     await verifyMarkedNeedsLayoutDuringTransientCallbacksPhase(tester, renderObject);
+  });
+
+  // Regression test for https://github.com/flutter/flutter/issues/151873
+  testWidgets('System fonts update during non-idle scheduler phase does not assert', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(const MaterialApp(home: Text('Hello')));
+
+    // Simulate a fontsChange system message arriving during a non-idle
+    // scheduler phase (e.g. midFrameMicrotasks on web when fonts load
+    // asynchronously). Previously this caused an assertion failure in
+    // _scheduleSystemFontsUpdate because it assumed the scheduler was idle.
+    tester.binding.scheduleFrameCallback((Duration timeStamp) {
+      // We're now inside transientCallbacks phase (not idle).
+      // Trigger a fonts change notification from here.
+      const data = <String, dynamic>{'type': 'fontsChange'};
+      tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        'flutter/system',
+        SystemChannels.system.codec.encodeMessage(data),
+        (ByteData? data) {},
+      );
+    });
+
+    // Pump to execute the frame callback. This should not throw.
+    await tester.pump();
+
+    // Pump again to let the scheduled frame callback run.
+    await tester.pump();
+
+    // Verify the text widget still renders correctly after the fonts update.
+    expect(find.text('Hello'), findsOneWidget);
   });
 
   testWidgets('TimePicker relayout upon system fonts changes', (WidgetTester tester) async {

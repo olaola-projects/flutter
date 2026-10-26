@@ -38,6 +38,7 @@ import '../protocol_discovery.dart';
 import '../vmservice.dart';
 import 'application_package.dart';
 import 'core_devices.dart';
+import 'device_support.dart';
 import 'ios_deploy.dart';
 import 'ios_workflow.dart';
 import 'iproxy.dart';
@@ -67,6 +68,17 @@ In the meantime, we recommend these temporary workarounds:
   profile mode via --release or --profile flags.
 ════════════════════════════════════════════════════════════════════════════════''';
 
+/// The error message shown when an iOS app fails to launch because it has not
+/// been migrated to the UIScene lifecycle.
+const String kUISceneMigrationRequiredError = '''
+════════════════════════════════════════════════════════════════════════════════
+Your iOS app has not been migrated to the UIScene lifecycle.
+UIScene lifecycle is required on iOS 27 and later.
+
+To migrate your app, please follow the migration guide at:
+  https://flutter.dev/to/uiscene-migration
+════════════════════════════════════════════════════════════════════════════════''';
+
 enum IOSDeploymentMethod {
   iosDeployLaunch,
   iosDeployLaunchAndAttach,
@@ -78,14 +90,11 @@ enum IOSDeploymentMethod {
 
 class IOSDevices extends PollingDeviceDiscovery {
   IOSDevices({
-    required Platform platform,
+    required this._platform,
     required this.xcdevice,
-    required IOSWorkflow iosWorkflow,
-    required Logger logger,
-  }) : _platform = platform,
-       _iosWorkflow = iosWorkflow,
-       _logger = logger,
-       super('iOS devices');
+    required this._iosWorkflow,
+    required this._logger,
+  }) : super('iOS devices');
 
   final Platform _platform;
   final IOSWorkflow _iosWorkflow;
@@ -296,35 +305,33 @@ class IOSDevices extends PollingDeviceDiscovery {
 class IOSDevice extends Device {
   IOSDevice(
     super.id, {
-    required FileSystem fileSystem,
+    required this._fileSystem,
+    required this._fileSystemUtils,
+    required this._processUtils,
     required this.name,
-    required this.cpuArchitecture,
+    required this._cpuArch,
+    this._cpuArchitectureString,
     required this.connectionInterface,
     required this.isConnected,
     required this.isPaired,
     required this.devModeEnabled,
     required this.isCoreDevice,
-    String? sdkVersion,
-    required Platform platform,
-    required IOSDeploy iosDeploy,
-    required IMobileDevice iMobileDevice,
-    required IOSCoreDeviceControl coreDeviceControl,
-    required IOSCoreDeviceLauncher coreDeviceLauncher,
-    required XcodeDebug xcodeDebug,
+    this._sdkVersion,
+    this._modelCode,
+    this._operatingSystemVersion,
+    required this._platform,
+    required this._iosDeploy,
+    required this._iMobileDevice,
+    required this._coreDeviceControl,
+    required this._coreDeviceLauncher,
+    required this._xcodeDebug,
     required IProxy iProxy,
     required super.logger,
-    required Analytics analytics,
-  }) : _sdkVersion = sdkVersion,
-       _iosDeploy = iosDeploy,
-       _iMobileDevice = iMobileDevice,
-       _coreDeviceControl = coreDeviceControl,
-       _coreDeviceLauncher = coreDeviceLauncher,
-       _xcodeDebug = xcodeDebug,
-       _iproxy = iProxy,
-       _fileSystem = fileSystem,
+    super.toolContext,
+    required this._analytics,
+    required this._xcode,
+  }) : _iproxy = iProxy,
        _logger = logger,
-       _analytics = analytics,
-       _platform = platform,
        super(category: Category.mobile, platformType: PlatformType.ios, ephemeral: true) {
     if (!_platform.isMacOS) {
       assert(false, 'Control of iOS devices or simulators only supported on Mac OS.');
@@ -333,15 +340,20 @@ class IOSDevice extends Device {
   }
 
   final String? _sdkVersion;
+  final String? _modelCode;
+  final String? _operatingSystemVersion;
   final IOSDeploy _iosDeploy;
   final Analytics _analytics;
   final FileSystem _fileSystem;
+  final FileSystemUtils _fileSystemUtils;
+  final ProcessUtils _processUtils;
   final Logger _logger;
   final Platform _platform;
   final IMobileDevice _iMobileDevice;
   final IOSCoreDeviceControl _coreDeviceControl;
   final IOSCoreDeviceLauncher _coreDeviceLauncher;
   final XcodeDebug _xcodeDebug;
+  final Xcode? _xcode;
   final IProxy _iproxy;
 
   Version? get sdkVersion {
@@ -353,13 +365,31 @@ class IOSDevice extends Device {
     return sdkVersion?.major ?? 0;
   }
 
+  late final IOSDeviceSupport deviceSupport = IOSDeviceSupport(
+    logger: _logger,
+    processUtils: _processUtils,
+    xcode: _xcode,
+    homeDirectory: _fileSystemUtils.homeDirPath == null
+        ? null
+        : _fileSystem.directory(_fileSystemUtils.homeDirPath),
+    modelCode: _modelCode,
+    operatingSystemVersion: _operatingSystemVersion,
+    cpuArchitectureString: _cpuArchitectureString,
+    deviceId: id,
+  );
+
   @override
   final String name;
 
   @override
   bool supportsRuntimeMode(BuildMode buildMode) => buildMode != BuildMode.jitRelease;
 
-  final DarwinArch cpuArchitecture;
+  final CpuArch _cpuArch;
+
+  final String? _cpuArchitectureString;
+
+  @override
+  Future<CpuArch> get cpuArch async => _cpuArch;
 
   @override
   /// The [connectionInterface] provided from `XCDevice.getAvailableIOSDevices`
@@ -484,7 +514,7 @@ class IOSDevice extends Device {
 
   @override
   // 32-bit devices are not supported.
-  Future<bool> isSupported() async => cpuArchitecture == DarwinArch.arm64;
+  Future<bool> isSupported() async => _cpuArch == .arm64;
 
   @override
   Future<LaunchResult> startApp(
@@ -517,10 +547,11 @@ class IOSDevice extends Device {
         app: package as BuildableIOSApp,
         buildInfo: debuggingOptions.buildInfo,
         targetOverride: mainPath,
-        activeArch: cpuArchitecture,
+        activeArch: _cpuArch,
         deviceID: id,
         disablePortPublication:
             debuggingOptions.usingCISystem && debuggingOptions.disablePortPublication,
+        toolContext: toolContext,
       );
       if (!buildResult.success) {
         _logger.printError('Could not build the precompiled application for the device.');
@@ -546,6 +577,11 @@ class IOSDevice extends Device {
     if (!bundle.existsSync()) {
       _logger.printError('Could not find the built application bundle at ${bundle.path}.');
       return LaunchResult.failed();
+    }
+
+    final bool shouldAttachDebugger = shouldAttachLLDBDebugger(debuggingOptions);
+    if (shouldAttachDebugger) {
+      await deviceSupport.prepareDeviceSupport();
     }
 
     // Step 3: Attempt to install the application on the device.
@@ -596,6 +632,7 @@ class IOSDevice extends Device {
           mainPath: mainPath,
           discoveryTimeout: discoveryTimeout,
           shutdownHooks: shutdownHooks ?? globals.shutdownHooks,
+          shouldAttachDebugger: shouldAttachDebugger,
         );
         installationResult = result ? 0 : 1;
         deploymentMethod = coreDeviceDeploymentMethod;
@@ -800,6 +837,7 @@ class IOSDevice extends Device {
           project: FlutterProject.current(),
           buildInfo: debuggingOptions.buildInfo,
           targetOverride: mainPath,
+          toolContext: toolContext,
         );
       }
     }
@@ -852,13 +890,23 @@ class IOSDevice extends Device {
         pattern: RegExp(
           '`UIScene` lifecycle will soon be required|This process does not adopt UIScene lifecycle',
         ),
-        action: () {
-          globals.printWarning(uisceneWarning);
+        action: (String message) {
+          _logger.printWarning(uisceneWarning);
         },
         excludeFromStream: true,
       );
       deviceLogReader.addLogInterceptor(uisceneWarningInterceptor);
     }
+
+    final uisceneCrashInterceptor = LogInterceptor(
+      identifier: 'uiscene_crash',
+      pattern: RegExp(r'UIScene life\s?cycle is required'),
+      action: (String message) {
+        throwToolExit(kUISceneMigrationRequiredError);
+      },
+      excludeFromStream: false,
+    );
+    deviceLogReader.addLogInterceptor(uisceneCrashInterceptor);
 
     final LogInterceptor? jitCrashInterceptor = await _jitCrashInterceptor();
     if (jitCrashInterceptor != null) {
@@ -868,7 +916,7 @@ class IOSDevice extends Device {
     final appTerminatedInterceptor = LogInterceptor(
       identifier: 'app_terminated',
       pattern: RegExp('^App terminated due to signal'),
-      action: () {
+      action: (String message) {
         if (!appTerminatedCompleter.isCompleted) {
           appTerminatedCompleter.complete();
         }
@@ -876,6 +924,20 @@ class IOSDevice extends Device {
       excludeFromStream: false,
     );
     deviceLogReader.addLogInterceptor(appTerminatedInterceptor);
+
+    final missingSymbolsInterceptor = LogInterceptor(
+      identifier: 'missing_symbols',
+      pattern: LLDB.missingSymbolsPattern,
+      action: (String message) {
+        _logger.printTrace(message);
+        final String? warning = deviceSupport.missingSymbolsWarning(warnWhenSymbolsExist: true);
+        if (warning != null) {
+          _logger.printWarning(warning);
+        }
+      },
+      excludeFromStream: true,
+    );
+    deviceLogReader.addLogInterceptor(missingSymbolsInterceptor);
   }
 
   /// Find the Dart VM url using ProtocolDiscovery (logs from `idevicesyslog`)
@@ -892,13 +954,14 @@ class IOSDevice extends Device {
   }) async {
     final bool discoverVMUrlFromLogs = vmServiceDiscovery != null && !isWirelesslyConnected;
 
-    // If mDNS fails, don't throw since url may still be findable through vmServiceDiscovery.
     final Future<Uri?> vmUrlFromMDns = MDnsVmServiceDiscovery.instance!.getVMServiceUriForLaunch(
       packageId,
       this,
-      usesIpv6: debuggingOptions.ipv6,
+      // If mDNS fails, don't throw if the URL may still be findable through
+      // log-based discovery (vmServiceDiscovery).
+      throwOnError: !discoverVMUrlFromLogs,
       useDeviceIPAsHost: isWirelesslyConnected,
-      throwOnMissingLocalNetworkPermissionsError: !discoverVMUrlFromLogs,
+      usesIpv6: debuggingOptions.ipv6,
     );
 
     final discoveryOptions = <Future<Uri?>>[
@@ -947,7 +1010,7 @@ class IOSDevice extends Device {
     return LogInterceptor(
       identifier: kJITCrashLogInterceptorIdentifier,
       pattern: kJITCrashFailureMessage,
-      action: () {
+      action: (String message) {
         throwToolExit(jitCrashFailureInstructions(deviceSdkVersion));
       },
       excludeFromStream: false,
@@ -993,6 +1056,15 @@ class IOSDevice extends Device {
     );
   }
 
+  /// Whether the LLDB debugger should be attached.
+  ///
+  /// The LLDB debugger should only be attached in debug mode or if the user uses the
+  /// `--ios-profile-debugger` flag in profile mode.
+  bool shouldAttachLLDBDebugger(DebuggingOptions debuggingOptions) {
+    return debuggingOptions.buildInfo.isDebug ||
+        (debuggingOptions.buildInfo.isProfile && (debuggingOptions.iosProfileDebugger ?? false));
+  }
+
   /// Uses either `devicectl` or Xcode automation to install, launch, and debug
   /// apps on physical iOS devices.
   ///
@@ -1016,6 +1088,7 @@ class IOSDevice extends Device {
     required IOSApp package,
     required List<String> launchArguments,
     required String? mainPath,
+    required bool shouldAttachDebugger,
     required ShutdownHooks shutdownHooks,
     @visibleForTesting Duration? discoveryTimeout,
   }) async {
@@ -1048,8 +1121,7 @@ class IOSDevice extends Device {
     // However, it doesn't work reliably until Xcode 26.
     // Use LLDB if Xcode version is greater than 26 and the feature is enabled.
     final Version? xcodeVersion = globals.xcode?.currentVersion;
-    final bool lldbFeatureEnabled = featureFlags.isLLDBDebuggingEnabled;
-    if (xcodeVersion != null && xcodeVersion.major >= 26 && lldbFeatureEnabled) {
+    if (xcodeVersion != null && xcodeVersion.major >= 26 && featureFlags.isLLDBDebuggingEnabled) {
       final DeviceLogReader deviceLogReader = getLogReader(
         app: package,
         usingCISystem: debuggingOptions.usingCISystem,
@@ -1058,28 +1130,50 @@ class IOSDevice extends Device {
         await deviceLogReader.listenToCoreDeviceLauncher(_coreDeviceLauncher);
       }
 
-      final bool launchSuccess = await _coreDeviceLauncher.launchAppWithLLDBDebugger(
-        deviceId: id,
-        bundlePath: package.deviceBundlePath,
-        bundleId: package.id,
-        launchArguments: launchArguments,
-        shutdownHooks: globals.shutdownHooks,
-        mode: debuggingOptions.buildInfo.mode,
-      );
-
-      // If it succeeds to launch with LLDB, return, otherwise continue on to
-      // try launching with Xcode.
-      if (launchSuccess) {
-        return (launchSuccess, IOSDeploymentMethod.coreDeviceWithLLDB);
-      } else {
-        deploymentMethod = IOSDeploymentMethod.coreDeviceWithXcodeFallback;
-        _analytics.send(
-          Event.appleUsageEvent(
-            workflow: 'ios-physical-deployment',
-            parameter: IOSDeploymentMethod.coreDeviceWithLLDB.name,
-            result: 'launch failed',
-          ),
+      if (shouldAttachDebugger) {
+        final bool launchSuccess = await _coreDeviceLauncher.launchAppWithLLDBDebugger(
+          deviceId: id,
+          deviceSupport: deviceSupport,
+          bundlePath: package.deviceBundlePath,
+          bundleId: package.id,
+          launchArguments: launchArguments,
+          shutdownHooks: globals.shutdownHooks,
+          mode: debuggingOptions.buildInfo.mode,
         );
+
+        if (launchSuccess) {
+          return (launchSuccess, IOSDeploymentMethod.coreDeviceWithLLDB);
+        } else {
+          deploymentMethod = IOSDeploymentMethod.coreDeviceWithXcodeFallback;
+          _analytics.send(
+            Event.appleUsageEvent(
+              workflow: 'ios-physical-deployment',
+              parameter: IOSDeploymentMethod.coreDeviceWithLLDB.name,
+              result: 'launch failed',
+            ),
+          );
+        }
+      } else {
+        final bool launchSuccess = await _coreDeviceLauncher.launchAppAndStreamLogsWithoutDebugger(
+          deviceId: id,
+          bundlePath: package.deviceBundlePath,
+          bundleId: package.id,
+          launchArguments: launchArguments,
+          shutdownHooks: globals.shutdownHooks,
+        );
+
+        if (launchSuccess) {
+          return (launchSuccess, IOSDeploymentMethod.coreDeviceWithoutDebugger);
+        } else {
+          deploymentMethod = IOSDeploymentMethod.coreDeviceWithXcodeFallback;
+          _analytics.send(
+            Event.appleUsageEvent(
+              workflow: 'ios-physical-deployment',
+              parameter: IOSDeploymentMethod.coreDeviceWithoutDebugger.name,
+              result: 'launch failed',
+            ),
+          );
+        }
       }
     }
 
@@ -1118,6 +1212,7 @@ class IOSDevice extends Device {
         buildInfo: debuggingOptions.buildInfo,
         targetOverride: mainPath,
         configurationBuildDir: bundle.parent.absolute.path,
+        toolContext: toolContext,
       );
 
       final IosProject project = package.project;
@@ -1250,8 +1345,12 @@ class IOSDevice extends Device {
       appId: appId,
       deviceVmservicePort: filterDevicePort,
       hostVmservicePort: expectedHostPort,
-      usesIpv6: ipv6,
+      // If compatible with protocol discovery via logs, do not throw on mDNS
+      // error so DelegateVMServiceDiscoveryForAttach can fall back to log-based
+      // discovery.
+      throwOnError: !compatibleWithProtocolDiscovery,
       useDeviceIPAsHost: isWirelesslyConnected,
+      usesIpv6: ipv6,
     );
 
     if (compatibleWithProtocolDiscovery) {
@@ -1273,17 +1372,42 @@ class IOSDevice extends Device {
 
   @override
   bool get supportsScreenshot {
-    if (isCoreDevice) {
-      // `idevicescreenshot` stopped working with iOS 17 / Xcode 15
-      // (https://github.com/flutter/flutter/issues/128598).
-      return false;
+    final Version? xcodeVersion = globals.xcode?.currentVersion;
+    if (isCoreDevice && xcodeVersion != null && xcodeVersion.major >= 27) {
+      return globals.xcode!.isDevicectlInstalled;
     }
-    return _iMobileDevice.isInstalled;
+    return false;
   }
 
   @override
   Future<void> takeScreenshot(File outputFile) async {
-    await _iMobileDevice.takeScreenshot(outputFile, id, connectionInterface);
+    final Version? xcodeVersion = globals.xcode?.currentVersion;
+    if (isCoreDevice && xcodeVersion != null && xcodeVersion.major >= 27) {
+      var success = false;
+      try {
+        success = await _coreDeviceControl.takeScreenshot(
+          deviceId: id,
+          destination: outputFile.path,
+        );
+      } on Exception catch (error) {
+        final errorMessage = error.toString();
+        if (errorMessage.contains('CoreDeviceError error 4000') ||
+            errorMessage.contains('CoreDeviceError error 4016') ||
+            errorMessage.contains('RemotePairingError error 2') ||
+            errorMessage.contains('Connection was invalidated')) {
+          throwToolExit(
+            'Failed to establish a connection to the device. '
+            'Please make sure the device is available and try again.',
+          );
+        }
+        throwToolExit('Failed to take screenshot with devicectl: $error');
+      }
+      if (success) {
+        return;
+      }
+      throwToolExit('Failed to take screenshot with devicectl.');
+    }
+    throwToolExit('flutter screenshot requires Xcode 27 or higher.');
   }
 
   @override
@@ -1378,7 +1502,7 @@ class LogInterceptor {
   final Pattern pattern;
 
   /// If the log contain the [pattern], the [action] will be called.
-  final void Function() action;
+  final void Function(String message) action;
 
   /// If `true`, the log will be excluded from being added to the stream.
   final bool excludeFromStream;
@@ -1416,7 +1540,7 @@ abstract class SharedIOSDeviceLogReader extends DeviceLogReader {
   bool _interceptLog(String message) {
     for (final LogInterceptor interceptor in _logInterceptors) {
       if (message.contains(interceptor.pattern)) {
-        interceptor.action();
+        interceptor.action(message);
         if (interceptor.excludeFromStream) {
           return true;
         }
@@ -1936,14 +2060,11 @@ class CoreDeviceLoggingSource {
 class IOSDevicePortForwarder extends DevicePortForwarder {
   /// Create a new [IOSDevicePortForwarder].
   IOSDevicePortForwarder({
-    required Logger logger,
-    required String id,
-    required IProxy iproxy,
-    required OperatingSystemUtils operatingSystemUtils,
-  }) : _logger = logger,
-       _id = id,
-       _iproxy = iproxy,
-       _operatingSystemUtils = operatingSystemUtils;
+    required this._logger,
+    required this._id,
+    required this._iproxy,
+    required this._operatingSystemUtils,
+  });
 
   /// Create a [IOSDevicePortForwarder] for testing.
   ///

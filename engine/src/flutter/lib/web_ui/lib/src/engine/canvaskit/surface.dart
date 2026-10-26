@@ -25,6 +25,9 @@ abstract class CkSurface extends Surface {
 
   final CanvasProvider _canvasProvider;
 
+  @override
+  bool get supportsPngEncoding => true;
+
   BitmapSize _currentSize = const BitmapSize(1, 1);
 
   /// The underlying Skia surface object.
@@ -85,7 +88,7 @@ abstract class CkSurface extends Surface {
   Future<void> get initialized => _initialized.future;
   final Completer<void> _initialized = Completer<void>();
 
-  late Completer<void>? _handledContextLostEvent;
+  Completer<void>? _handledContextLostEvent;
 
   /// Creates the canvas object and initializes the graphics context.
   Future<void> _initialize() async {
@@ -234,13 +237,65 @@ abstract class CkSurface extends Surface {
   @override
   Future<ByteData?> rasterizeImage(ui.Image image, ui.ImageByteFormat format) async {
     await _initialized.future;
-    final ckImage = image as CkImage;
+
+    final EngineImage engineImage;
+    final SkImage skImage;
+    if (image case EngineImage(backendImage: CkImageDelegate(skImage: final imageRef))) {
+      engineImage = image;
+      skImage = imageRef;
+    } else {
+      throw ArgumentError('The image being rasterized must be a CanvasKit image.');
+    }
+
+    final SkAlphaType alphaType = format == ui.ImageByteFormat.rawStraightRgba
+        ? canvasKit.AlphaType.Unpremul
+        : canvasKit.AlphaType.Premul;
+
+    Uint8List? bytes;
+    if (format == ui.ImageByteFormat.rawRgba || format == ui.ImageByteFormat.rawStraightRgba) {
+      final imageInfo = SkImageInfo(
+        alphaType: alphaType,
+        colorType: canvasKit.ColorType.RGBA_8888,
+        colorSpace: SkColorSpaceSRGB,
+        width: skImage.width(),
+        height: skImage.height(),
+      );
+      bytes = skImage.readPixels(0, 0, imageInfo);
+    } else {
+      bytes = skImage.encodeToBytes(); // defaults to PNG 100%
+    }
+
+    if (bytes != null) {
+      return bytes.buffer.asByteData();
+    }
+
+    setSize(BitmapSize(engineImage.width, engineImage.height));
     final SkSurface skSurface = _skSurface!;
     final canvas = CkCanvas.fromSkCanvas(skSurface.getCanvas());
-    canvas.drawImage(ckImage, ui.Offset.zero, ui.Paint());
+
+    canvas.clear(const ui.Color(0x00000000));
+    final paint = CkPaint();
+
+    canvas.drawImage(engineImage, ui.Offset.zero, paint);
     final SkImage snapshot = skSurface.makeImageSnapshot();
-    final Uint8List? bytes = snapshot.encodeToBytes();
-    snapshot.delete();
+
+    try {
+      if (format == ui.ImageByteFormat.rawRgba || format == ui.ImageByteFormat.rawStraightRgba) {
+        final imageInfo = SkImageInfo(
+          alphaType: alphaType,
+          colorType: canvasKit.ColorType.RGBA_8888,
+          colorSpace: SkColorSpaceSRGB,
+          width: engineImage.width.toDouble(),
+          height: engineImage.height.toDouble(),
+        );
+        bytes = snapshot.readPixels(0, 0, imageInfo);
+      } else {
+        bytes = snapshot.encodeToBytes();
+      }
+    } finally {
+      snapshot.delete();
+    }
+
     return bytes?.buffer.asByteData();
   }
 
@@ -250,10 +305,14 @@ abstract class CkSurface extends Surface {
   @override
   Future<void> rasterizeToCanvas(ui.Picture picture) async {
     await _initialized.future;
+    _drawPicture(picture as CkPicture);
+  }
+
+  /// Synchronously clears the surface, draws [picture] into it, and flushes.
+  void _drawPicture(CkPicture picture) {
     final canvas = CkCanvas.fromSkCanvas(_skSurface!.getCanvas());
-    final ckPicture = picture as CkPicture;
     canvas.clear(const ui.Color(0x00000000));
-    canvas.drawPicture(ckPicture);
+    canvas.drawPicture(picture);
     _skSurface!.flush();
   }
 
@@ -279,14 +338,39 @@ class CkOffscreenSurface extends CkSurface implements OffscreenSurface {
   }
 
   @override
-  Future<List<DomImageBitmap>> rasterizeToImageBitmaps(List<ui.Picture> pictures) async {
+  Future<List<DomImageBitmap>> rasterizeToImageBitmaps(
+    BitmapSize size,
+    List<ui.Picture> pictures,
+  ) async {
     await _initialized.future;
-    final bitmaps = <DomImageBitmap>[];
+    // Everything from here until all bitmaps have been requested must be
+    // synchronous so that no other operation can resize or draw into the
+    // canvas in between. `createImageBitmap` copies the canvas contents at the
+    // time it is called; only the resolution of the returned promise is
+    // asynchronous.
+    setSize(size);
+    final bitmapFutures = <Future<DomImageBitmap>>[];
     for (final picture in pictures) {
-      await rasterizeToCanvas(picture);
-      bitmaps.add(await createImageBitmap(_canvas));
+      _drawPicture(picture as CkPicture);
+      bitmapFutures.add(createImageBitmap(_canvas));
     }
-    return bitmaps;
+    return Future.wait(bitmapFutures);
+  }
+
+  @override
+  Future<void> rasterizeToCanvasSource(
+    BitmapSize size,
+    List<ui.Picture> pictures,
+    void Function(int index, DomCanvasImageSource source) onRendered,
+  ) async {
+    await _initialized.future;
+    // Everything from here on must be synchronous so that no other operation
+    // can resize or draw into the canvas while `onRendered` reads from it.
+    setSize(size);
+    for (var i = 0; i < pictures.length; i++) {
+      _drawPicture(pictures[i] as CkPicture);
+      onRendered(i, canvasImageSource);
+    }
   }
 
   @override
@@ -328,12 +412,24 @@ class CkOnscreenSurface extends CkSurface implements OnscreenSurface {
 
   @override
   bool get isConnected =>
-      ((canvas as JSAny?).isA<DomHTMLCanvasElement>()) &&
+      (canvas as JSAny?).isA<DomHTMLCanvasElement>() &&
       (canvas as DomHTMLCanvasElement).isConnected!;
 
   @override
   void initialize() {
     // No extra initialization is required.
+  }
+
+  @override
+  void setIsOverlay(bool isOverlay) {
+    final DomCSSStyleDeclaration style = (canvas as DomHTMLCanvasElement).style;
+    if (isOverlay) {
+      if (style.position != 'absolute') {
+        style.position = 'absolute';
+      }
+    } else if (style.position == 'absolute') {
+      style.removeProperty('position');
+    }
   }
 
   @override

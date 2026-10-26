@@ -36,7 +36,7 @@ class _FakeFlutterVmService extends Fake implements FlutterVmService {
   final int _appPid;
 
   @override
-  Future<VM?> getVmGuarded() async => _FakeVm(_appPid);
+  Future<VM?> getVmGuarded({required Logger logger}) async => _FakeVm(_appPid);
 }
 
 void main() {
@@ -114,6 +114,37 @@ void main() {
             '05-11 12:54:46.665 E/FrameEvents($appPid): updateAcquireFence: Did not find frame.\n'
             '05-11 12:54:46.666 E/FrameEvents($appPid): updateAcquireFence: Did not find frame.\n'
             '05-11 12:54:46.667 E/FrameEvents($appPid): updateAcquireFence: Did not find frame.\n',
+      ),
+    ]);
+    final AdbLogReader logReader = await AdbLogReader.createLogReader(
+      createFakeDevice(null),
+      processManager,
+      BufferLogger.test(),
+    );
+    await logReader.provideVmService(_FakeFlutterVmService(appPid));
+    final onDone = Completer<void>.sync();
+    final emittedLines = <String>[];
+    logReader.logLines.listen((String line) {
+      emittedLines.add(line);
+    }, onDone: onDone.complete);
+    await null;
+    logReader.dispose();
+    await onDone.future;
+    expect(emittedLines, const <String>['W/flutter($appPid): Hello there!']);
+  });
+
+  // Regression test for https://github.com/flutter/flutter/issues/174783
+  testWithoutContext('AdbLogReader ignores spam from MotionEvent-JNI', () async {
+    const appPid = 1;
+    final processManager = FakeProcessManager.list(<FakeCommand>[
+      FakeCommand(
+        command: const <String>['adb', '-s', '1234', 'shell', '-x', 'logcat', '-v', 'time'],
+        completer: Completer<void>.sync(),
+        stdout:
+            '$kDummyLine'
+            '05-11 12:54:46.665 W/flutter($appPid): Hello there!\n'
+            '05-11 12:54:46.665 W/MotionEvent-JNI($appPid): android_view_MotionEvent_nativeGetPointerCount: -1\n'
+            '05-11 12:54:46.666 W/MotionEvent-JNI($appPid): android_view_MotionEvent_nativeGetPointerCount: -1\n',
       ),
     ]);
     final AdbLogReader logReader = await AdbLogReader.createLogReader(

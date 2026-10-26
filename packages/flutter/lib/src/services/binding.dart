@@ -39,8 +39,9 @@ export 'restoration.dart' show RestorationManager;
 /// Listens for platform messages and directs them to the [defaultBinaryMessenger].
 ///
 /// The [ServicesBinding] also registers a [LicenseEntryCollector] that exposes
-/// the licenses found in the `LICENSE` file stored at the root of the asset
-/// bundle, and implements the `ext.flutter.evict` service extension (see
+/// the licenses found in the `NOTICES` file (or its compressed variant,
+/// `NOTICES.Z`) stored at the root of the asset bundle, and implements the
+/// `ext.flutter.evict` service extension (see
 /// [evict]).
 mixin ServicesBinding on BindingBase, SchedulerBinding {
   @override
@@ -593,6 +594,7 @@ mixin ServicesBinding on BindingBase, SchedulerBinding {
   /// menu calls from the engine.
   ///
   /// To unregister, set to null.
+  // ignore: avoid_setters_without_getters
   static set systemContextMenuClient(SystemContextMenuClient? client) {
     instance._systemContextMenuClient = client;
   }

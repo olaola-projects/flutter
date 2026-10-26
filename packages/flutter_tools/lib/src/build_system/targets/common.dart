@@ -10,12 +10,13 @@ import '../../base/file_system.dart';
 import '../../base/io.dart';
 import '../../build_info.dart';
 import '../../compile.dart';
+import '../../context_runner.dart' show GlobalToolContext;
 import '../../dart/package_map.dart';
 import '../../darwin/darwin.dart';
 import '../../devfs.dart';
-import '../../globals.dart' as globals show xcode;
 import '../../isolated/native_assets/dart_hook_result.dart';
 import '../../project.dart';
+import '../../windows/visual_studio.dart';
 import '../build_system.dart';
 import '../depfile.dart';
 import '../exceptions.dart';
@@ -39,7 +40,7 @@ class CopyFlutterBundle extends Target {
     Source.artifact(Artifact.vmSnapshotData, mode: BuildMode.debug),
     Source.artifact(Artifact.isolateSnapshotData, mode: BuildMode.debug),
     Source.pattern('{BUILD_DIR}/app.dill'),
-    Source.pattern('{BUILD_DIR}/${DartBuild.dartHookResultFilename}'),
+    Source.pattern('{BUILD_DIR}/${LinkHooks.resultFilename}'),
     ...IconTreeShaker.inputs,
     ...ShaderCompiler.inputs,
   ];
@@ -49,7 +50,7 @@ class CopyFlutterBundle extends Target {
     Source.pattern('{OUTPUT_DIR}/vm_snapshot_data'),
     Source.pattern('{OUTPUT_DIR}/isolate_snapshot_data'),
     Source.pattern('{OUTPUT_DIR}/kernel_blob.bin'),
-    Source.pattern('{BUILD_DIR}/${DartBuild.dartHookResultFilename}'),
+    Source.pattern('{BUILD_DIR}/${LinkHooks.resultFilename}'),
   ];
 
   @override
@@ -86,7 +87,7 @@ class CopyFlutterBundle extends Target {
           .file(isolateSnapshotData)
           .copySync(environment.outputDir.childFile('isolate_snapshot_data').path);
     }
-    final DartHooksResult dartHookResult = await DartBuild.loadHookResult(environment);
+    final DartHooksResult dartHookResult = await LinkHooks.loadHookResult(environment);
     final Depfile assetDepfile = await copyAssets(
       environment,
       environment.outputDir,
@@ -108,7 +109,7 @@ class CopyFlutterBundle extends Target {
 
   @override
   List<Target> get dependencies => const <Target>[
-    DartBuildForNative(),
+    LinkHooks(),
     KernelSnapshot(),
     InstallCodeAssets(),
   ];
@@ -156,7 +157,7 @@ class KernelSnapshot extends Target {
   @override
   List<Source> get outputs => const <Source>[
     Source.pattern('{BUILD_DIR}/${KernelSnapshot.dillName}'),
-    // TODO(mosuem): Should output resources.json. https://github.com/flutter/flutter/issues/146263
+    Source.pattern('{BUILD_DIR}/${KernelSnapshot.recordedUsesFileName}'),
   ];
 
   static const depfile = 'kernel_snapshot_program.d';
@@ -171,6 +172,13 @@ class KernelSnapshot extends Target {
   ];
 
   static const dillName = 'app.dill';
+  static const recordedUsesFileName = 'recorded_uses.json';
+
+  /// The content of an empty recorded uses file.
+  ///
+  /// We always write this file even if no resources are recorded to prevent
+  /// tripping up the Flutter build system (which expects declared outputs to exist).
+  static const recordedUsesEmptyContent = '{}';
 
   @override
   Future<void> build(Environment environment) async {
@@ -196,7 +204,7 @@ class KernelSnapshot extends Target {
     final String targetFileAbsolute = environment.fileSystem.file(targetFile).absolute.path;
     // everything besides 'false' is considered to be enabled.
     final trackWidgetCreation = environment.defines[kTrackWidgetCreation] != 'false';
-    final TargetPlatform targetPlatform = getTargetPlatformForName(targetPlatformEnvironment);
+    final targetPlatform = TargetPlatform.fromName(targetPlatformEnvironment);
 
     // This configuration is all optional.
     final String? frontendServerStarterPath = environment.defines[kFrontendServerStarterPath];
@@ -204,12 +212,23 @@ class KernelSnapshot extends Target {
       environment.defines,
       kExtraFrontEndOptions,
     );
+    final File recordedUsesFile = environment.buildDir.childFile(
+      KernelSnapshot.recordedUsesFileName,
+    );
+    if (buildMode.isPrecompiled) {
+      // Always pass --recorded-uses in AOT mode because both recorded uses for
+      // link hooks and icon tree shaking depend on this file.
+      extraFrontEndOptions.add('--recorded-uses=${recordedUsesFile.path}');
+    } else {
+      // Produce an empty file to satisfy the build system in JIT mode.
+      // Always overwrite to avoid stale data.
+      recordedUsesFile.writeAsStringSync(KernelSnapshot.recordedUsesEmptyContent);
+    }
     final List<String>? fileSystemRoots = environment.defines[kFileSystemRoots]?.split(',');
     final String? fileSystemScheme = environment.defines[kFileSystemScheme];
 
     TargetModel targetModel = TargetModel.flutter;
-    if (targetPlatform == TargetPlatform.fuchsia_x64 ||
-        targetPlatform == TargetPlatform.fuchsia_arm64) {
+    if (targetPlatform.os == .fuchsia) {
       targetModel = TargetModel.flutterRunner;
     }
     // Force linking of the platform for desktop embedder targets since these
@@ -238,20 +257,15 @@ class KernelSnapshot extends Target {
         TargetPlatform.throwUnsupportedTarget();
     }
 
-    final String? targetOS = switch (targetPlatform) {
-      TargetPlatform.fuchsia_arm64 || TargetPlatform.fuchsia_x64 => 'fuchsia',
-      TargetPlatform.android ||
-      TargetPlatform.android_arm ||
-      TargetPlatform.android_arm64 ||
-      TargetPlatform.android_x64 => 'android',
-      TargetPlatform.darwin => 'macos',
-      TargetPlatform.ios => 'ios',
-      TargetPlatform.linux_arm64 ||
-      TargetPlatform.linux_riscv64 ||
-      TargetPlatform.linux_x64 => 'linux',
-      TargetPlatform.windows_arm64 || TargetPlatform.windows_x64 => 'windows',
-      TargetPlatform.tester || TargetPlatform.web_javascript => null,
-      TargetPlatform.unsupported => TargetPlatform.throwUnsupportedTarget(),
+    final String? targetOS = switch (targetPlatform.os) {
+      .fuchsia => 'fuchsia',
+      .android => 'android',
+      .macos => 'macos',
+      .ios => 'ios',
+      .linux => 'linux',
+      .windows => 'windows',
+      .tester || .web => null,
+      .unsupported => TargetPlatform.throwUnsupportedTarget(),
     };
 
     final PackageConfig packageConfig = await loadPackageConfigWithLogging(
@@ -292,6 +306,9 @@ class KernelSnapshot extends Target {
     );
     if (output == null || output.errorCount != 0) {
       throw Exception();
+    }
+    if (buildMode.isPrecompiled && !recordedUsesFile.existsSync()) {
+      throw Exception('${KernelSnapshot.recordedUsesFileName} was not generated by the compiler.');
     }
   }
 
@@ -335,37 +352,44 @@ class KernelSnapshot extends Target {
   }
 }
 
-/// Supports compiling a dart kernel file to an ELF binary.
-abstract class AotElfBase extends Target {
-  const AotElfBase();
+/// Supports compiling a dart kernel file to a native AOT binary.
+abstract class AotSnapshotBase extends Target {
+  const AotSnapshotBase();
 
   @override
   String get analyticsName => 'android_aot';
 
+  TargetPlatform get targetPlatform;
+
   @override
   Future<void> build(Environment environment) async {
-    final snapshotter = AOTSnapshotter(
-      fileSystem: environment.fileSystem,
-      logger: environment.logger,
-      xcode: globals.xcode!,
-      processManager: environment.processManager,
-      artifacts: environment.artifacts,
-    );
     final String outputPath = environment.buildDir.path;
     final String? buildModeEnvironment = environment.defines[kBuildMode];
     if (buildModeEnvironment == null) {
-      throw MissingDefineException(kBuildMode, 'aot_elf');
+      throw MissingDefineException(kBuildMode, 'aot_snapshot');
     }
     final String? targetPlatformEnvironment = environment.defines[kTargetPlatform];
     if (targetPlatformEnvironment == null) {
-      throw MissingDefineException(kTargetPlatform, 'aot_elf');
+      throw MissingDefineException(kTargetPlatform, 'aot_snapshot');
     }
     final List<String> extraGenSnapshotOptions = decodeCommaSeparated(
       environment.defines,
       kExtraGenSnapshotOptions,
     );
     final buildMode = BuildMode.fromCliName(buildModeEnvironment);
-    final TargetPlatform targetPlatform = getTargetPlatformForName(targetPlatformEnvironment);
+    final targetPlatform = TargetPlatform.fromName(targetPlatformEnvironment);
+    // TODO(team-windows): Support PE/COFF AOT snapshots for Windows Arm64.
+    // See: https://github.com/flutter/flutter/issues/190897
+    final String? windowsLinkerPath = targetPlatform == TargetPlatform.windows_x64
+        ? VisualStudio(toolContext: const GlobalToolContext()).linkPath
+        : null;
+    final snapshotter = AOTSnapshotter(
+      fileSystem: environment.fileSystem,
+      logger: environment.logger,
+      processManager: environment.processManager,
+      artifacts: environment.artifacts,
+      windowsLinkerPath: windowsLinkerPath,
+    );
     final String? splitDebugInfo = environment.defines[kSplitDebugInfo];
     final dartObfuscation = environment.defines[kDartObfuscation] == 'true';
     final String? codeSizeDirectory = environment.defines[kCodeSizeDirectory];
@@ -396,12 +420,21 @@ abstract class AotElfBase extends Target {
   }
 }
 
-/// Generate an ELF binary from a dart kernel file in profile mode.
-class AotElfProfile extends AotElfBase {
-  const AotElfProfile(this.targetPlatform);
+List<Source> _aotOutputsForTarget(TargetPlatform targetPlatform) {
+  return <Source>[
+    const Source.pattern('{BUILD_DIR}/app.so'),
+    if (targetPlatform == TargetPlatform.windows_x64) ...const <Source>[
+      Source.pattern('{BUILD_DIR}/app.o'),
+    ],
+  ];
+}
+
+/// Generate a native AOT binary from a dart kernel file in profile mode.
+class AotSnapshotProfile extends AotSnapshotBase {
+  const AotSnapshotProfile(this.targetPlatform);
 
   @override
-  String get name => 'aot_elf_profile';
+  String get name => 'aot_snapshot_profile';
 
   @override
   List<Source> get inputs => <Source>[
@@ -415,20 +448,21 @@ class AotElfProfile extends AotElfBase {
   ];
 
   @override
-  List<Source> get outputs => const <Source>[Source.pattern('{BUILD_DIR}/app.so')];
+  List<Source> get outputs => _aotOutputsForTarget(targetPlatform);
 
   @override
   List<Target> get dependencies => const <Target>[KernelSnapshot()];
 
+  @override
   final TargetPlatform targetPlatform;
 }
 
-/// Generate an ELF binary from a dart kernel file in release mode.
-class AotElfRelease extends AotElfBase {
-  const AotElfRelease(this.targetPlatform);
+/// Generate a native AOT binary from a dart kernel file in release mode.
+class AotSnapshotRelease extends AotSnapshotBase {
+  const AotSnapshotRelease(this.targetPlatform);
 
   @override
-  String get name => 'aot_elf_release';
+  String get name => 'aot_snapshot_release';
 
   @override
   List<Source> get inputs => <Source>[
@@ -442,11 +476,12 @@ class AotElfRelease extends AotElfBase {
   ];
 
   @override
-  List<Source> get outputs => const <Source>[Source.pattern('{BUILD_DIR}/app.so')];
+  List<Source> get outputs => _aotOutputsForTarget(targetPlatform);
 
   @override
   List<Target> get dependencies => const <Target>[KernelSnapshot()];
 
+  @override
   final TargetPlatform targetPlatform;
 }
 
@@ -479,7 +514,7 @@ abstract final class Lipo {
   /// Otherwise, `lipo` would fail if the given paths didn't exist.
   static Future<void> create(
     Environment environment,
-    List<DarwinArch> darwinArchs, {
+    List<CpuArch> cpuArchs, {
     required String relativePath,
     required String inputDir,
     bool skipMissingInputs = false,
@@ -490,9 +525,9 @@ abstract final class Lipo {
     );
     environment.fileSystem.directory(resultPath).parent.createSync(recursive: true);
 
-    Iterable<String> inputPaths = darwinArchs.map(
-      (DarwinArch iosArch) =>
-          environment.fileSystem.path.join(inputDir, iosArch.name, relativePath),
+    Iterable<String> inputPaths = cpuArchs.map(
+      (CpuArch cpuArch) =>
+          environment.fileSystem.path.join(inputDir, cpuArch.darwinArchName, relativePath),
     );
     if (skipMissingInputs) {
       inputPaths = inputPaths.where(environment.fileSystem.isFileSync);

@@ -4,8 +4,10 @@
 
 import 'dart:async';
 
+import 'package:flutter_tools_core/flutter_tools_core.dart' as tools_core;
 import 'package:meta/meta.dart';
 
+import 'android/android_engine_cli_flags.dart';
 import 'application_package.dart';
 import 'base/context.dart';
 import 'base/dds.dart';
@@ -13,6 +15,7 @@ import 'base/file_system.dart';
 import 'base/logger.dart';
 import 'base/utils.dart';
 import 'build_info.dart';
+import 'context/tool_context.dart';
 import 'devfs.dart';
 import 'device_port_forwarder.dart';
 import 'device_vm_service_discovery_for_attach.dart';
@@ -23,23 +26,8 @@ import 'web/devfs_config.dart';
 
 DeviceManager? get deviceManager => context.get<DeviceManager>();
 
-/// A description of the kind of workflow the device supports.
-enum Category {
-  web._('web'),
-  desktop._('desktop'),
-  mobile._('mobile');
-
-  const Category._(this.value);
-
-  final String value;
-
-  @override
-  String toString() => value;
-
-  static Category? fromString(String category) {
-    return const <String, Category>{'web': web, 'desktop': desktop, 'mobile': mobile}[category];
-  }
-}
+/// The user-visible category of a [Device].
+typedef Category = tools_core.Category;
 
 /// The platform sub-folder that a device type supports.
 enum PlatformType {
@@ -60,7 +48,7 @@ enum PlatformType {
 
 /// A discovery mechanism for flutter-supported development devices.
 abstract class DeviceManager {
-  DeviceManager({required Logger logger}) : _logger = logger;
+  DeviceManager({required this._logger});
 
   final Logger _logger;
 
@@ -310,25 +298,23 @@ class DeviceDiscoverySupportFilter {
       _flutterProject = null;
 
   /// Filter devices to only include those supported by Flutter and the
-  /// provided [flutterProject].
+  /// provided [_flutterProject].
   ///
-  /// If [flutterProject] is null, all devices will be considered supported by
+  /// If [_flutterProject] is null, all devices will be considered supported by
   /// the project.
   DeviceDiscoverySupportFilter.excludeDevicesUnsupportedByFlutterOrProject({
-    required FlutterProject? flutterProject,
-  }) : _flutterProject = flutterProject,
-       _excludeDevicesNotSupportedByProject = true,
+    required this._flutterProject,
+  }) : _excludeDevicesNotSupportedByProject = true,
        _excludeDevicesNotSupportedByAll = false;
 
   /// Filter devices to only include those supported by Flutter, the provided
-  /// [flutterProject], and `--device all`.
+  /// [_flutterProject], and `--device all`.
   ///
-  /// If [flutterProject] is null, all devices will be considered supported by
+  /// If [_flutterProject] is null, all devices will be considered supported by
   /// the project.
   DeviceDiscoverySupportFilter.excludeDevicesUnsupportedByFlutterOrProjectOrAll({
-    required FlutterProject? flutterProject,
-  }) : _flutterProject = flutterProject,
-       _excludeDevicesNotSupportedByProject = true,
+    required this._flutterProject,
+  }) : _excludeDevicesNotSupportedByProject = true,
        _excludeDevicesNotSupportedByAll = true;
 
   final FlutterProject? _flutterProject;
@@ -354,11 +340,10 @@ class DeviceDiscoverySupportFilter {
   /// runner instance. Both web and fuchsia require differently configured
   /// compilers, and web requires an entirely different resident runner.
   Future<bool> isDeviceSupportedForAll(Device device) async {
-    final TargetPlatform devicePlatform = await device.targetPlatform;
+    final TargetOperatingSystem deviceOS = (await device.targetPlatform).os;
     return await device.isSupported() &&
-        devicePlatform != TargetPlatform.fuchsia_arm64 &&
-        devicePlatform != TargetPlatform.fuchsia_x64 &&
-        devicePlatform != TargetPlatform.web_javascript &&
+        deviceOS != .fuchsia &&
+        deviceOS != .web &&
         await isDeviceSupportedForProject(device);
   }
 
@@ -376,7 +361,7 @@ class DeviceDiscoverySupportFilter {
     if (_flutterProject == null) {
       return true;
     }
-    return device.isSupportedForProject(_flutterProject);
+    return await device.isSupportedForProject(_flutterProject);
   }
 }
 
@@ -472,12 +457,16 @@ abstract class DeviceDiscovery {
 /// A [DeviceDiscovery] implementation that uses polling to discover device adds
 /// and removals.
 abstract class PollingDeviceDiscovery extends DeviceDiscovery {
-  PollingDeviceDiscovery(this.name);
+  PollingDeviceDiscovery(this.name, {this._toolContext});
 
   static const _pollingInterval = Duration(seconds: 4);
   static const _pollingTimeout = Duration(seconds: 30);
 
   final String name;
+  final ToolContext? _toolContext;
+
+  @protected
+  ToolContext get toolContext => _toolContext!;
 
   @protected
   @visibleForTesting
@@ -615,12 +604,17 @@ abstract class Device {
   Device(
     this.id, {
     required Logger logger,
+    this._toolContext,
     required this.category,
     required this.platformType,
     required this.ephemeral,
   }) : dds = DartDevelopmentService(logger: logger);
 
   final String id;
+  final ToolContext? _toolContext;
+
+  @protected
+  ToolContext get toolContext => _toolContext!;
 
   /// The [Category] for this device type.
   final Category? category;
@@ -676,7 +670,7 @@ abstract class Device {
   }
 
   /// Whether the device is supported for the current project directory.
-  bool isSupportedForProject(FlutterProject flutterProject);
+  FutureOr<bool> isSupportedForProject(FlutterProject flutterProject);
 
   /// Check if a version of the given app is already installed.
   ///
@@ -707,9 +701,11 @@ abstract class Device {
   /// The device's platform.
   Future<TargetPlatform> get targetPlatform;
 
+  /// The CPU architecture of the device.
+  Future<CpuArch> get cpuArch;
+
   /// Platform name for display only.
-  Future<String> get targetPlatformDisplayName async =>
-      getNameForTargetPlatform(await targetPlatform);
+  Future<String> get targetPlatformDisplayName async => (await targetPlatform).getName();
 
   Future<String> get sdkNameAndVersion;
 
@@ -883,7 +879,8 @@ abstract class Device {
       'name': name,
       'id': id,
       'isSupported': await isSupported(),
-      'targetPlatform': getNameForTargetPlatform(await targetPlatform),
+      'targetPlatform': (await targetPlatform).getName(),
+      'cpuArch': (await cpuArch).name,
       'emulator': isLocalEmu,
       'sdk': await sdkNameAndVersion,
       'capabilities': <String, Object>{
@@ -938,11 +935,117 @@ enum ImpellerStatus {
   final bool? asBool;
 }
 
+/// Configuration options for web debugging and the web development server.
+@immutable
+class WebDebugConfig {
+  /// Creates a [WebDebugConfig] with the given options.
+  const WebDebugConfig({
+    this.enableExposeUrl = false,
+    this.useSseForDebugProxy = true,
+    this.useSseForDebugBackend = true,
+    this.useSseForInjectedClient = true,
+    this.runHeadless = false,
+    this.browserDebugPort,
+    this.browserFlags = const <String>[],
+    this.enableExpressionEvaluation = false,
+    this.launchUrl,
+    bool? crossOriginIsolation,
+    WebRendererMode? renderer,
+    this.useWasm = false,
+    this.devServerConfig,
+  }) : crossOriginIsolation = crossOriginIsolation ?? useWasm,
+       renderer =
+           renderer ?? (useWasm ? WebRendererMode.defaultForWasm : WebRendererMode.defaultForJs);
+
+  /// Creates a [WebDebugConfig] from a serialized JSON [json] map.
+  factory WebDebugConfig.fromJson(Map<String, Object?> json) => WebDebugConfig(
+    enableExposeUrl: json['webEnableExposeUrl'] as bool? ?? false,
+    useSseForDebugProxy: json['webUseSseForDebugProxy']! as bool,
+    useSseForDebugBackend: json['webUseSseForDebugBackend']! as bool,
+    useSseForInjectedClient: json['webUseSseForInjectedClient']! as bool,
+    runHeadless: json['webRunHeadless']! as bool,
+    browserDebugPort: json['webBrowserDebugPort'] as int?,
+    browserFlags: (json['webBrowserFlags']! as List<dynamic>).cast<String>(),
+    enableExpressionEvaluation: json['webEnableExpressionEvaluation']! as bool,
+    launchUrl: json['webLaunchUrl'] as String?,
+    crossOriginIsolation: json['webCrossOriginIsolation']! as bool,
+    renderer: WebRendererMode.values.byName(json['webRenderer']! as String),
+    useWasm: json['webUseWasm']! as bool,
+    devServerConfig: WebDevServerConfig(
+      port: json['port'] is int ? json['port']! as int : 8080,
+      host: json['hostname'] is String ? json['hostname']! as String : 'localhost',
+      https: HttpsConfig.parse(json['tlsCertPath'], json['tlsCertKeyPath']),
+      headers: (json['webHeaders']! as Map<dynamic, dynamic>).cast<String, String>(),
+    ),
+  );
+
+  /// Whether to enable exposing URLs via the daemon URL tunneller.
+  final bool enableExposeUrl;
+
+  /// Whether to use Server-Sent Events (SSE) for the debug proxy.
+  final bool useSseForDebugProxy;
+
+  /// Whether to use Server-Sent Events (SSE) for the debug backend.
+  final bool useSseForDebugBackend;
+
+  /// Whether to use Server-Sent Events (SSE) for the injected client.
+  final bool useSseForInjectedClient;
+
+  /// Whether to run the browser in headless mode.
+  final bool runHeadless;
+
+  /// The debug port for the browser, or `null` to use the default port.
+  final int? browserDebugPort;
+
+  /// Additional command-line flags to pass to the browser when launching.
+  final List<String> browserFlags;
+
+  /// Whether expression evaluation is enabled in the web debugger.
+  final bool enableExpressionEvaluation;
+
+  /// A custom URL to launch in the browser instead of the default serving URL.
+  final String? launchUrl;
+
+  /// Whether Cross-Origin Isolation headers are enabled on the web dev server.
+  final bool crossOriginIsolation;
+
+  /// The web rendering backend mode to use.
+  final WebRendererMode renderer;
+
+  /// Whether to compile the application to WebAssembly (Wasm).
+  final bool useWasm;
+
+  /// Configuration for the local web development server.
+  final WebDevServerConfig? devServerConfig;
+
+  /// Serializes this configuration into a JSON-compatible map.
+  Map<String, Object?> toJson() => <String, Object?>{
+    'port': devServerConfig?.port,
+    'hostname': devServerConfig?.host,
+    'tlsCertPath': devServerConfig?.https?.certPath,
+    'tlsCertKeyPath': devServerConfig?.https?.certKeyPath,
+    'webEnableExposeUrl': enableExposeUrl,
+    'webUseSseForDebugProxy': useSseForDebugProxy,
+    'webUseSseForDebugBackend': useSseForDebugBackend,
+    'webUseSseForInjectedClient': useSseForInjectedClient,
+    'webRunHeadless': runHeadless,
+    'webBrowserDebugPort': browserDebugPort,
+    'webBrowserFlags': browserFlags,
+    'webEnableExpressionEvaluation': enableExpressionEvaluation,
+    'webLaunchUrl': launchUrl,
+    'webCrossOriginIsolation': crossOriginIsolation,
+    'webHeaders': devServerConfig?.headers ?? <String, String>{},
+    'webRenderer': renderer.name,
+    'webUseWasm': useWasm,
+  };
+}
+
 class DebuggingOptions {
   DebuggingOptions.enabled(
     this.buildInfo, {
     this.startPaused = false,
     this.disableServiceAuthCodes = false,
+    this.disableServiceOriginCheck = false,
     this.enableDds = true,
     this.cacheStartupProfile = false,
     this.dartEntrypointArgs = const <String>[],
@@ -964,18 +1067,7 @@ class DebuggingOptions {
     this.deviceVmServicePort,
     this.ddsPort,
     this.devToolsServerAddress,
-    this.webEnableExposeUrl,
-    this.webUseSseForDebugProxy = true,
-    this.webUseSseForDebugBackend = true,
-    this.webUseSseForInjectedClient = true,
-    this.webRunHeadless = false,
-    this.webBrowserDebugPort,
-    this.webBrowserFlags = const <String>[],
-    this.webEnableExpressionEvaluation = false,
-    this.webLaunchUrl,
-    bool? webCrossOriginIsolation,
-    WebRendererMode? webRenderer,
-    this.webUseWasm = false,
+    this.webConfig = const WebDebugConfig(),
     this.vmserviceOutFile,
     this.nativeNullAssertions = false,
     this.enableImpeller = ImpellerStatus.platformDefault,
@@ -984,7 +1076,7 @@ class DebuggingOptions {
     this.uninstallFirst = false,
     this.uninstallApp = true,
     this.enableDartProfiling = true,
-    this.enableHcpp = false,
+    this.enableHcpp,
     this.profileStartup = false,
     this.enableEmbedderApi = false,
     this.usingCISystem = false,
@@ -993,25 +1085,15 @@ class DebuggingOptions {
     this.ipv6 = false,
     this.google3WorkspaceRoot,
     this.printDtd = false,
-    this.webDevServerConfig,
-  }) : debuggingEnabled = true,
-       webCrossOriginIsolation = webCrossOriginIsolation ?? webUseWasm,
-       webRenderer = webRenderer ?? WebRendererMode.getDefault(useWasm: webUseWasm);
+    this.testFlag = false,
+    this.adbLogFiltering = true,
+    this.iosProfileDebugger,
+  }) : debuggingEnabled = true;
 
   DebuggingOptions.disabled(
     this.buildInfo, {
     this.dartEntrypointArgs = const <String>[],
-    this.webEnableExposeUrl,
-    this.webUseSseForDebugProxy = true,
-    this.webUseSseForDebugBackend = true,
-    this.webUseSseForInjectedClient = true,
-    this.webRunHeadless = false,
-    this.webBrowserDebugPort,
-    this.webBrowserFlags = const <String>[],
-    this.webLaunchUrl,
-    bool? webCrossOriginIsolation,
-    WebRendererMode? webRenderer,
-    this.webUseWasm = false,
+    this.webConfig = const WebDebugConfig(),
     this.traceAllowlist,
     this.enableImpeller = ImpellerStatus.platformDefault,
     this.enableFlutterGpu = false,
@@ -1019,24 +1101,27 @@ class DebuggingOptions {
     this.uninstallFirst = false,
     this.uninstallApp = true,
     this.enableDartProfiling = true,
-    this.enableHcpp = false,
+    this.enableHcpp,
     this.profileStartup = false,
     this.enableEmbedderApi = false,
     this.usingCISystem = false,
     this.debugLogsDirectoryPath,
-    this.webDevServerConfig,
+    this.testFlag = false,
+    this.iosProfileDebugger,
+    this.traceSystrace = false,
   }) : debuggingEnabled = false,
+       adbLogFiltering = true,
        useTestFonts = false,
        startPaused = false,
        dartFlags = '',
        disableServiceAuthCodes = false,
+       disableServiceOriginCheck = false,
        enableDds = false,
        cacheStartupProfile = false,
        enableSoftwareRendering = false,
        skiaDeterministicRendering = false,
        traceSkia = false,
        traceSkiaAllowlist = null,
-       traceSystrace = false,
        traceToFile = null,
        endlessTraceBuffer = false,
        profileMicrotasks = false,
@@ -1048,14 +1133,11 @@ class DebuggingOptions {
        ddsPort = null,
        devToolsServerAddress = null,
        vmserviceOutFile = null,
-       webEnableExpressionEvaluation = false,
-       webCrossOriginIsolation = webCrossOriginIsolation ?? webUseWasm,
        nativeNullAssertions = false,
        enableDevTools = false,
        ipv6 = false,
        google3WorkspaceRoot = null,
-       printDtd = false,
-       webRenderer = webRenderer ?? WebRendererMode.getDefault(useWasm: webUseWasm);
+       printDtd = false;
 
   DebuggingOptions._({
     required this.buildInfo,
@@ -1064,6 +1146,7 @@ class DebuggingOptions {
     required this.dartFlags,
     required this.dartEntrypointArgs,
     required this.disableServiceAuthCodes,
+    required this.disableServiceOriginCheck,
     required this.enableDds,
     required this.cacheStartupProfile,
     required this.enableSoftwareRendering,
@@ -1083,18 +1166,7 @@ class DebuggingOptions {
     required this.disablePortPublication,
     required this.ddsPort,
     required this.devToolsServerAddress,
-    required this.webEnableExposeUrl,
-    required this.webUseSseForDebugProxy,
-    required this.webUseSseForDebugBackend,
-    required this.webUseSseForInjectedClient,
-    required this.webRunHeadless,
-    required this.webBrowserDebugPort,
-    required this.webBrowserFlags,
-    required this.webEnableExpressionEvaluation,
-    required this.webLaunchUrl,
-    required this.webCrossOriginIsolation,
-    required this.webRenderer,
-    required this.webUseWasm,
+    required this.webConfig,
     required this.vmserviceOutFile,
     required this.nativeNullAssertions,
     required this.enableImpeller,
@@ -1112,8 +1184,9 @@ class DebuggingOptions {
     required this.ipv6,
     required this.google3WorkspaceRoot,
     required this.printDtd,
-    this.webDevServerConfig,
-  });
+    required this.adbLogFiltering,
+    this.iosProfileDebugger,
+  }) : testFlag = false;
 
   final bool debuggingEnabled;
 
@@ -1122,6 +1195,7 @@ class DebuggingOptions {
   final String dartFlags;
   final List<String> dartEntrypointArgs;
   final bool disableServiceAuthCodes;
+  final bool disableServiceOriginCheck;
   final bool enableDds;
   final bool cacheStartupProfile;
   final bool enableSoftwareRendering;
@@ -1141,15 +1215,22 @@ class DebuggingOptions {
   final bool disablePortPublication;
   final int? ddsPort;
   final Uri? devToolsServerAddress;
-  final bool? webEnableExposeUrl;
-  final bool webUseSseForDebugProxy;
-  final bool webUseSseForDebugBackend;
-  final bool webUseSseForInjectedClient;
+
+  /// Configuration options for web debugging and the web development server.
+  final WebDebugConfig webConfig;
+
   final ImpellerStatus enableImpeller;
   final bool enableFlutterGpu;
   final bool enableVulkanValidation;
   final bool enableDartProfiling;
-  final bool enableHcpp;
+
+  /// Whether HCPP platform views were explicitly enabled or disabled with
+  /// `--[no-]enable-hcpp`.
+  ///
+  /// When null the flag was not passed, and no override is sent to the device
+  /// at launch, so the `io.flutter.embedding.android.EnableHcpp` value in the
+  /// manifest of the installed artifact decides.
+  final bool? enableHcpp;
   final bool profileStartup;
   final bool enableEmbedderApi;
   final bool usingCISystem;
@@ -1158,7 +1239,11 @@ class DebuggingOptions {
   final bool ipv6;
   final String? google3WorkspaceRoot;
   final bool printDtd;
-  final WebDevServerConfig? webDevServerConfig;
+  final bool testFlag;
+  final bool adbLogFiltering;
+
+  /// Whether to attach the LLDB debugger when running in profile mode on a physical iOS device.
+  final bool? iosProfileDebugger;
 
   /// Whether the tool should try to uninstall a previously installed version of the app.
   ///
@@ -1170,35 +1255,6 @@ class DebuggingOptions {
   /// This is currently only implemented for integration tests.
   /// Defaults to true.
   final bool uninstallApp;
-
-  /// Whether to run the browser in headless mode.
-  ///
-  /// Some CI environments do not provide a display and fail to launch the
-  /// browser with full graphics stack. Some browsers provide a special
-  /// "headless" mode that runs the browser with no graphics.
-  final bool webRunHeadless;
-
-  /// The port the browser should use for its debugging protocol.
-  final int? webBrowserDebugPort;
-
-  /// Arbitrary browser flags.
-  final List<String> webBrowserFlags;
-
-  /// Enable expression evaluation for web target.
-  final bool webEnableExpressionEvaluation;
-
-  /// Allow developers to customize the browser's launch URL
-  final String? webLaunchUrl;
-
-  /// Whether to enable cross-origin isolation. This is on by default for the
-  /// skwasm renderer.
-  final bool webCrossOriginIsolation;
-
-  /// Which web renderer to use for the debugging session
-  final WebRendererMode webRenderer;
-
-  /// Whether to compile to webassembly
-  final bool webUseWasm;
 
   /// A file where the VM Service URL should be written after the application is started.
   final String? vmserviceOutFile;
@@ -1219,6 +1275,7 @@ class DebuggingOptions {
       if (enableDartProfiling) '--enable-dart-profiling',
       if (profileStartup) '--profile-startup',
       if (disableServiceAuthCodes) '--disable-service-auth-codes',
+      if (disableServiceOriginCheck) '--disable-service-origin-check',
       if (disablePortPublication) '--disable-vm-service-publication',
       if (startPaused) '--start-paused',
       // Wrap dart flags in quotes for physical devices
@@ -1259,10 +1316,12 @@ class DebuggingOptions {
 
   Map<String, Object?> toJson() => <String, Object?>{
     'debuggingEnabled': debuggingEnabled,
+    'iosProfileDebugger': iosProfileDebugger,
     'startPaused': startPaused,
     'dartFlags': dartFlags,
     'dartEntrypointArgs': dartEntrypointArgs,
     'disableServiceAuthCodes': disableServiceAuthCodes,
+    'disableServiceOriginCheck': disableServiceOriginCheck,
     'enableDds': enableDds,
     'cacheStartupProfile': cacheStartupProfile,
     'enableSoftwareRendering': enableSoftwareRendering,
@@ -1282,23 +1341,7 @@ class DebuggingOptions {
     'disablePortPublication': disablePortPublication,
     'ddsPort': ddsPort,
     'devToolsServerAddress': devToolsServerAddress.toString(),
-    'port': webDevServerConfig?.port,
-    'hostname': webDevServerConfig?.host,
-    'tlsCertPath': webDevServerConfig?.https?.certPath,
-    'tlsCertKeyPath': webDevServerConfig?.https?.certKeyPath,
-    'webEnableExposeUrl': webEnableExposeUrl,
-    'webUseSseForDebugProxy': webUseSseForDebugProxy,
-    'webUseSseForDebugBackend': webUseSseForDebugBackend,
-    'webUseSseForInjectedClient': webUseSseForInjectedClient,
-    'webRunHeadless': webRunHeadless,
-    'webBrowserDebugPort': webBrowserDebugPort,
-    'webBrowserFlags': webBrowserFlags,
-    'webEnableExpressionEvaluation': webEnableExpressionEvaluation,
-    'webLaunchUrl': webLaunchUrl,
-    'webCrossOriginIsolation': webCrossOriginIsolation,
-    'webHeaders': webDevServerConfig?.headers ?? <String, String>{},
-    'webRenderer': webRenderer.name,
-    'webUseWasm': webUseWasm,
+    ...webConfig.toJson(),
     'vmserviceOutFile': vmserviceOutFile,
     'nativeNullAssertions': nativeNullAssertions,
     'enableImpeller': enableImpeller.asBool,
@@ -1317,6 +1360,7 @@ class DebuggingOptions {
     'ipv6': ipv6,
     'google3WorkspaceRoot': google3WorkspaceRoot,
     'printDtd': printDtd,
+    'adbLogFiltering': adbLogFiltering,
     // TODO(jsimmons): This field is required for backward compatibility with
     // the flutter_tools binary that is currently checked into Google3.
     // Remove this when that binary has been updated.
@@ -1331,10 +1375,12 @@ class DebuggingOptions {
       DebuggingOptions._(
         buildInfo: buildInfo,
         debuggingEnabled: json['debuggingEnabled']! as bool,
+        iosProfileDebugger: json['iosProfileDebugger'] as bool?,
         startPaused: json['startPaused']! as bool,
         dartFlags: json['dartFlags']! as String,
         dartEntrypointArgs: (json['dartEntrypointArgs']! as List<dynamic>).cast<String>(),
         disableServiceAuthCodes: json['disableServiceAuthCodes']! as bool,
+        disableServiceOriginCheck: json['disableServiceOriginCheck'] as bool? ?? false,
         enableDds: json['enableDds']! as bool,
         cacheStartupProfile: json['cacheStartupProfile']! as bool,
         enableSoftwareRendering: json['enableSoftwareRendering']! as bool,
@@ -1356,18 +1402,7 @@ class DebuggingOptions {
         devToolsServerAddress: json['devToolsServerAddress'] != null
             ? Uri.parse(json['devToolsServerAddress']! as String)
             : null,
-        webEnableExposeUrl: json['webEnableExposeUrl'] as bool?,
-        webUseSseForDebugProxy: json['webUseSseForDebugProxy']! as bool,
-        webUseSseForDebugBackend: json['webUseSseForDebugBackend']! as bool,
-        webUseSseForInjectedClient: json['webUseSseForInjectedClient']! as bool,
-        webRunHeadless: json['webRunHeadless']! as bool,
-        webBrowserDebugPort: json['webBrowserDebugPort'] as int?,
-        webBrowserFlags: (json['webBrowserFlags']! as List<dynamic>).cast<String>(),
-        webEnableExpressionEvaluation: json['webEnableExpressionEvaluation']! as bool,
-        webLaunchUrl: json['webLaunchUrl'] as String?,
-        webCrossOriginIsolation: json['webCrossOriginIsolation']! as bool,
-        webRenderer: WebRendererMode.values.byName(json['webRenderer']! as String),
-        webUseWasm: json['webUseWasm']! as bool,
+        webConfig: WebDebugConfig.fromJson(json),
         vmserviceOutFile: json['vmserviceOutFile'] as String?,
         nativeNullAssertions: json['nativeNullAssertions']! as bool,
         enableImpeller: ImpellerStatus.fromBool(json['enableImpeller'] as bool?),
@@ -1376,7 +1411,7 @@ class DebuggingOptions {
         uninstallFirst: (json['uninstallFirst'] as bool?) ?? false,
         uninstallApp: (json['uninstallApp'] as bool?) ?? true,
         enableDartProfiling: (json['enableDartProfiling'] as bool?) ?? true,
-        enableHcpp: (json['enableHcpp'] as bool?) ?? false,
+        enableHcpp: json['enableHcpp'] as bool?,
         profileStartup: (json['profileStartup'] as bool?) ?? false,
         enableEmbedderApi: (json['enableEmbedderApi'] as bool?) ?? false,
         usingCISystem: (json['usingCISystem'] as bool?) ?? false,
@@ -1385,13 +1420,82 @@ class DebuggingOptions {
         ipv6: (json['ipv6'] as bool?) ?? false,
         google3WorkspaceRoot: json['google3WorkspaceRoot'] as String?,
         printDtd: (json['printDtd'] as bool?) ?? false,
-        webDevServerConfig: WebDevServerConfig(
-          port: json['port'] is int ? json['port']! as int : 8080,
-          host: json['hostname'] is String ? json['hostname']! as String : 'localhost',
-          https: HttpsConfig.parse(json['tlsCertPath'], json['tlsCertKeyPath']),
-          headers: (json['webHeaders']! as Map<dynamic, dynamic>).cast<String, String>(),
-        ),
+        adbLogFiltering: (json['adbLogFiltering'] as bool?) ?? true,
       );
+
+  Map<String, Object?> _getAndroidEngineConfig() {
+    return <String, Object?>{
+      if (enableDartProfiling) AndroidEngineCliFlags.enableDartProfiling: true,
+      if (profileStartup) AndroidEngineCliFlags.profileStartup: true,
+      if (enableSoftwareRendering) AndroidEngineCliFlags.enableSoftwareRendering: true,
+      if (skiaDeterministicRendering) AndroidEngineCliFlags.skiaDeterministicRendering: true,
+      if (traceSkia) AndroidEngineCliFlags.traceSkia: true,
+      if (traceAllowlist != null) AndroidEngineCliFlags.traceAllowlist: traceAllowlist,
+      if (traceSkiaAllowlist != null) AndroidEngineCliFlags.traceSkiaAllowlist: traceSkiaAllowlist,
+      if (traceSystrace) AndroidEngineCliFlags.traceSystrace: true,
+      if (traceToFile != null) AndroidEngineCliFlags.traceToFile: traceToFile,
+      if (endlessTraceBuffer) AndroidEngineCliFlags.endlessTraceBuffer: true,
+      if (profileMicrotasks) AndroidEngineCliFlags.profileMicrotasks: true,
+      if (purgePersistentCache) AndroidEngineCliFlags.purgePersistentCache: true,
+      if (enableImpeller == ImpellerStatus.enabled) AndroidEngineCliFlags.enableImpeller: true,
+      if (enableImpeller == ImpellerStatus.disabled) AndroidEngineCliFlags.enableImpeller: false,
+      if (enableFlutterGpu) AndroidEngineCliFlags.enableFlutterGpu: true,
+      if (enableVulkanValidation) AndroidEngineCliFlags.enableVulkanValidation: true,
+      if (enableHcpp != null) AndroidEngineCliFlags.enableHcppAndSurfaceControl: enableHcpp,
+      if (testFlag) AndroidEngineCliFlags.testFlag: true,
+      if (debuggingEnabled) ...<String, Object?>{
+        // TODO(camsim99): Determine if we should even forward these to the Android embedding since Android
+        // appears unsupported. https://github.com/flutter/flutter/issues/191849
+        if (buildInfo.isDebug) 'enable-checked-mode': true,
+        if (buildInfo.isDebug) 'verify-entry-points': true,
+        if (startPaused) AndroidEngineCliFlags.startPaused: true,
+        if (disableServiceAuthCodes) AndroidEngineCliFlags.disableServiceAuthCodes: true,
+        if (disableServiceOriginCheck) AndroidEngineCliFlags.disableServiceOriginCheck: true,
+        if (dartFlags.isNotEmpty) AndroidEngineCliFlags.dartFlags: dartFlags,
+        if (useTestFonts) AndroidEngineCliFlags.useTestFonts: true,
+        if (verboseSystemLogs) AndroidEngineCliFlags.verboseLogging: true,
+      },
+    };
+  }
+
+  /// Retrieves Android engine shell arguments from the debugging options based on the
+  /// command line flags that are passed to the engine via the manifest.
+  Set<String> getAndroidLaunchArguments() {
+    final Map<String, Object?> configs = _getAndroidEngineConfig();
+    final args = <String>{};
+    for (final MapEntry<String, Object?> entry in configs.entries) {
+      final Object? value = entry.value;
+      if (entry.key == AndroidEngineCliFlags.enableImpeller ||
+          entry.key == AndroidEngineCliFlags.enableHcppAndSurfaceControl) {
+        args.add('--${entry.key}=$value');
+      } else if (value is bool) {
+        args.add(value ? '--${entry.key}' : '--${entry.key}=false');
+      } else if (value is String) {
+        args.add('--${entry.key}=$value');
+      } else {
+        assert(false, 'Unsupported engine config value type ${value.runtimeType} for ${entry.key}');
+      }
+    }
+    return args;
+  }
+
+  /// Retrieves Android engine shell arguments from the debugging options based on the
+  /// command line flags that are passed to the engine via the manifest as Intent extras.
+  List<String> getAndroidLaunchArgumentsAsIntentExtras() {
+    final Map<String, Object?> configs = _getAndroidEngineConfig();
+    final args = <String>[];
+    for (final MapEntry<String, Object?> entry in configs.entries) {
+      final Object? value = entry.value;
+      if (value is bool) {
+        args.addAll(<String>['--ez', entry.key, value.toString()]);
+      } else if (value is String) {
+        args.addAll(<String>['--es', entry.key, value]);
+      } else {
+        assert(false, 'Unsupported engine config value type ${value.runtimeType} for ${entry.key}');
+      }
+    }
+    return args;
+  }
 }
 
 class LaunchResult {
@@ -1430,13 +1534,6 @@ abstract class DeviceLogReader {
 
   // Clean up resources allocated by log reader e.g. subprocesses
   void dispose();
-}
-
-/// Describes an app running on the device.
-class DiscoveredApp {
-  DiscoveredApp(this.id, this.vmServicePort);
-  final String id;
-  final int vmServicePort;
 }
 
 // An empty device log reader

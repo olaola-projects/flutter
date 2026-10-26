@@ -63,7 +63,7 @@ void PlaygroundImplVK::DestroyWindowHandle(WindowHandle handle) {
   ::glfwDestroyWindow(reinterpret_cast<GLFWwindow*>(handle));
 }
 
-PlaygroundImplVK::PlaygroundImplVK(PlaygroundSwitches switches)
+PlaygroundImplVK::PlaygroundImplVK(const PlaygroundSwitches& switches)
     : PlaygroundImpl(switches), handle_(nullptr, &DestroyWindowHandle) {
   FML_CHECK(IsVulkanDriverPresent());
 
@@ -214,10 +214,10 @@ void PlaygroundImplVK::InitGlobalVulkanInstance() {
   global_instance_ = instance_result.value.release();
 }
 
-fml::Status PlaygroundImplVK::SetCapabilities(
+absl::Status PlaygroundImplVK::SetCapabilities(
     const std::shared_ptr<Capabilities>& capabilities) {
-  return fml::Status(
-      fml::StatusCode::kUnimplemented,
+  return absl::Status(
+      absl::StatusCode::kUnimplemented,
       "PlaygroundImplVK doesn't support setting the capabilities.");
 }
 

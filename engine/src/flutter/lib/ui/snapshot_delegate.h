@@ -5,6 +5,8 @@
 #ifndef FLUTTER_LIB_UI_SNAPSHOT_DELEGATE_H_
 #define FLUTTER_LIB_UI_SNAPSHOT_DELEGATE_H_
 
+#include <functional>
+#include <memory>
 #include <string>
 
 #include "flutter/common/graphics/texture.h"
@@ -14,6 +16,12 @@
 #include "third_party/skia/include/gpu/ganesh/GrBackendSurface.h"
 #include "third_party/skia/include/gpu/ganesh/GrContextThreadSafeProxy.h"
 #include "third_party/skia/include/gpu/ganesh/GrDirectContext.h"
+
+namespace impeller {
+class Texture;
+class RuntimeStage;
+class AiksContext;
+}  // namespace impeller
 
 namespace flutter {
 
@@ -77,18 +85,56 @@ class SnapshotDelegate {
 
   virtual GrDirectContext* GetGrContext() = 0;
 
-  virtual void MakeRasterSnapshot(sk_sp<DisplayList> display_list,
-                                  DlISize picture_size,
-                                  std::function<void(sk_sp<DlImage>)> callback,
-                                  SnapshotPixelFormat pixel_format) = 0;
+  virtual std::shared_ptr<impeller::AiksContext> GetAiksContext() const = 0;
 
-  virtual sk_sp<DlImage> MakeRasterSnapshotSync(
+  virtual void MakeSkiaSnapshot(sk_sp<DisplayList> display_list,
+                                DlISize picture_size,
+                                std::function<void(sk_sp<SkImage>)> callback,
+                                SnapshotPixelFormat pixel_format) = 0;
+
+  virtual sk_sp<SkImage> MakeSkiaSnapshotSync(
       sk_sp<DisplayList> display_list,
       DlISize picture_size,
       SnapshotPixelFormat pixel_format) = 0;
 
-  virtual sk_sp<DlImage> MakeTextureImage(sk_sp<SkImage> image,
-                                          SnapshotPixelFormat pixel_format) = 0;
+  //----------------------------------------------------------------------------
+  /// @brief      Produces the display list to snapshot.
+  ///
+  ///             Invoked on the raster thread after a rendering context has
+  ///             been made current, with the AiksContext that will render the
+  ///             result. Producing the display list may itself need that
+  ///             AiksContext, for example to flatten a layer tree containing
+  ///             external textures. May return nullptr to signal failure.
+  ///
+  using SnapshotDisplayListProvider =
+      std::function<sk_sp<DisplayList>(impeller::AiksContext* aiks_context)>;
+
+  //----------------------------------------------------------------------------
+  /// @brief      Renders the display list produced by |provider| into a
+  ///             texture. |provider| is invoked once a rendering context is
+  ///             current. Impeller only.
+  ///
+  virtual void MakeImpellerSnapshot(
+      SnapshotDisplayListProvider provider,
+      DlISize picture_size,
+      std::function<void(std::shared_ptr<impeller::Texture>)> callback,
+      SnapshotPixelFormat pixel_format) = 0;
+
+  //----------------------------------------------------------------------------
+  /// @brief      Synchronous version of |MakeImpellerSnapshot|. Impeller only.
+  ///
+  virtual std::shared_ptr<impeller::Texture> MakeImpellerSnapshotSync(
+      SnapshotDisplayListProvider provider,
+      DlISize picture_size,
+      SnapshotPixelFormat pixel_format) = 0;
+
+  virtual sk_sp<SkImage> MakeSkiaTextureImage(
+      sk_sp<SkImage> image,
+      SnapshotPixelFormat pixel_format) = 0;
+
+  virtual std::shared_ptr<impeller::Texture> MakeImpellerTextureImage(
+      sk_sp<SkImage> image,
+      SnapshotPixelFormat pixel_format) = 0;
 
   virtual sk_sp<SkImage> ConvertToRasterImage(sk_sp<SkImage> image) = 0;
 

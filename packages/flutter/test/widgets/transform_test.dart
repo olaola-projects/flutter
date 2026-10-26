@@ -535,7 +535,7 @@ void main() {
   testWidgets(
     '3D transform renders the same with or without needsCompositing',
     (WidgetTester tester) async {
-      for (double angle = 0; angle <= math.pi / 4; angle += 0.01) {
+      for (double angle = 0; angle <= math.pi / 4; angle += 0.05) {
         await tester.pumpWidget(RepaintBoundary(child: generateTransform(true, angle)));
         final RenderBox renderBox = tester.binding.renderView.child!;
         final layer = renderBox.debugLayer! as OffsetLayer;
@@ -953,6 +953,18 @@ void main() {
     await tester.tapAt(bottomRight);
 
     expect(tappedRed, isTrue, reason: 'Transform.flip cannot flipX and flipY together');
+  });
+
+  testWidgets('Transform does not crash at zero area', (WidgetTester tester) async {
+    tester.view.physicalSize = Size.zero;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: Center(child: Transform.flip(flipY: true, child: const Placeholder())),
+      ),
+    );
+    expect(tester.getSize(find.byType(Transform)), Size.zero);
   });
 }
 

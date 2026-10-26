@@ -4,12 +4,11 @@
 
 import 'dart:async';
 
-import 'package:file/memory.dart';
 import 'package:meta/meta.dart';
-import 'package:process/process.dart';
 import 'package:unified_analytics/unified_analytics.dart';
 
 import '../base/common.dart';
+import '../base/config.dart';
 import '../base/file_system.dart';
 import '../base/io.dart';
 import '../base/logger.dart';
@@ -20,96 +19,70 @@ import '../base/terminal.dart';
 import '../base/utils.dart';
 import '../base/version.dart';
 import '../build_info.dart';
-import '../reporting/reporting.dart';
+import '../context/tool_context.dart';
+import '../macos/swift_package_manager.dart';
+import '../plugins.dart';
 import '../xcode_project.dart';
 
 final _settingExpr = RegExp(r'(\w+)\s*=\s*(.*)$');
 final _varExpr = RegExp(r'\$\(([^)]*)\)');
-const kSwiftPackageCacheDirectoryName = 'SourcePackages';
+
+/// Matches each `XCLocalSwiftPackageReference` object body in a
+/// `project.pbxproj` file, capturing its `relativePath` value.
+///
+/// Local Swift packages (added directly to the Xcode project rather than
+/// fetched as a remote dependency) are recorded this way; unlike remote
+/// checkouts, they never appear under the derived data `checkouts`
+/// directory, so they must be located by parsing the project file directly.
+final _localSwiftPackageReferenceExpr = RegExp(
+  r'isa\s*=\s*XCLocalSwiftPackageReference\s*;[^}]*relativePath\s*=\s*(?:"([^"]*)"|([^;]+))\s*;',
+  dotAll: true,
+);
 
 /// Interpreter of Xcode projects.
 class XcodeProjectInterpreter {
-  factory XcodeProjectInterpreter({
-    required Platform platform,
-    required ProcessManager processManager,
-    required Logger logger,
-    required FileSystem fileSystem,
-    required Analytics analytics,
-  }) {
-    return XcodeProjectInterpreter._(
-      platform: platform,
-      processManager: processManager,
-      logger: logger,
-      fileSystem: fileSystem,
-      analytics: analytics,
-    );
-  }
+  XcodeProjectInterpreter({required this._analytics, required this._toolContext});
 
   XcodeProjectInterpreter._({
-    required Platform platform,
-    required ProcessManager processManager,
-    required Logger logger,
-    required FileSystem fileSystem,
-    required Analytics analytics,
-    Version? version,
-    String? build,
-  }) : _platform = platform,
-       _fileSystem = fileSystem,
-       _logger = logger,
-       _processUtils = ProcessUtils(logger: logger, processManager: processManager),
-       _operatingSystemUtils = OperatingSystemUtils(
-         fileSystem: fileSystem,
-         logger: logger,
-         platform: platform,
-         processManager: processManager,
-       ),
-       _version = version,
-       _build = build,
-       _versionText = version?.toString(),
-       _analytics = analytics;
+    required this._analytics,
+    required this._toolContext,
+    this._version,
+    this._build,
+  }) : _versionText = _version?.toString();
 
   /// Create an [XcodeProjectInterpreter] for testing.
   ///
   /// Defaults to installed with sufficient version,
   /// a memory file system, fake platform, buffer logger,
-  /// test [Usage], and test [Terminal].
+  /// test [Analytics], and test [Terminal].
   /// Set [version] to null to simulate Xcode not being installed.
   factory XcodeProjectInterpreter.test({
-    required ProcessManager processManager,
+    required ToolContext toolContext,
     Version? version = const Version.withText(1000, 0, 0, '1000.0.0'),
     String? build = '13C100',
     Analytics? analytics,
   }) {
-    final Platform platform = FakePlatform(
-      operatingSystem: 'macos',
-      environment: <String, String>{},
-    );
     return XcodeProjectInterpreter._(
-      fileSystem: MemoryFileSystem.test(),
-      platform: platform,
-      processManager: processManager,
-      logger: BufferLogger.test(),
-      version: version,
-      build: build,
       analytics: analytics ?? const NoOpAnalytics(),
+      build: build,
+      toolContext: toolContext,
+      version: version,
     );
   }
 
-  final Platform _platform;
-  final FileSystem _fileSystem;
-  final ProcessUtils _processUtils;
-  final OperatingSystemUtils _operatingSystemUtils;
-  final Logger _logger;
   final Analytics _analytics;
+  final ToolContext _toolContext;
   static final _versionRegex = RegExp(r'Xcode ([0-9.]+).*Build version (\w+)');
 
   void _updateVersion() {
-    if (!_platform.isMacOS || !_fileSystem.file('/usr/bin/xcodebuild').existsSync()) {
+    final ToolContext(fs: FileSystem fileSystem, :Platform platform, :ProcessUtils processUtils) =
+        _toolContext;
+    if (!platform.isMacOS || !fileSystem.file('/usr/bin/xcodebuild').existsSync()) {
       return;
     }
     try {
       if (_versionText == null) {
-        final RunResult result = _processUtils.runSync(<String>[
+        final RunResult result = processUtils.runSync(<String>[
           ...xcrunCommand(),
           'xcodebuild',
           '-version',
@@ -169,7 +142,7 @@ class XcodeProjectInterpreter {
   /// to run outside the x86 Rosetta translation, which may cause crashes.
   List<String> xcrunCommand() {
     final xcrunCommand = <String>[];
-    if (_operatingSystemUtils.hostPlatform == HostPlatform.darwin_arm64) {
+    if (_toolContext.os.hostPlatform == HostPlatform.darwin_arm64) {
       // Force Xcode commands to run outside Rosetta.
       xcrunCommand.addAll(<String>['/usr/bin/arch', '-arm64e']);
     }
@@ -188,7 +161,7 @@ class XcodeProjectInterpreter {
   Future<List<String>> fetchDependenciesAndGenerateXcodebuildArgs(
     XcodeBasedProject xcodeProject,
     Directory buildDirectory, {
-    bool skipPackageUpdatesAndValidation = true,
+    bool skipPackageValidation = true,
   }) async {
     // All `xcodebuild` project commands will download and resolve Swift packages.
     // We should always prefetch Swift packages before running any `xcodebuild` project command
@@ -197,29 +170,30 @@ class XcodeProjectInterpreter {
 
     return _xcodebuildProjectCommandArguments(
       buildDirectory,
-      skipPackageUpdatesAndValidation: skipPackageUpdatesAndValidation,
+      skipPackageValidation: skipPackageValidation,
     );
+  }
+
+  /// Returns the absolute path to the Swift package cache directory.
+  String swiftPackageCachePath(Directory buildDirectory) {
+    return buildDirectory.childDirectory(kSwiftPackageCacheDirectoryName).absolute.path;
   }
 
   /// Returns a list of required arguments for the `xcodebuild` Xcode project command.
   ///
-  /// When [skipPackageUpdatesAndValidation] is true, it uses arguments to attempt skipping any
-  /// Swift package updates and validation.
+  /// When [skipPackageValidation] is true, it uses arguments to attempt skipping any Swift
+  /// package validation.
   List<String> _xcodebuildProjectCommandArguments(
     Directory buildDirectory, {
-    bool skipPackageUpdatesAndValidation = true,
+    bool skipPackageValidation = true,
   }) {
-    final String cachePath = buildDirectory
-        .childDirectory(kSwiftPackageCacheDirectoryName)
-        .absolute
-        .path;
+    final String cachePath = swiftPackageCachePath(buildDirectory);
     return <String>[
       ...xcrunCommand(),
       'xcodebuild',
       '-clonedSourcePackagesDirPath',
       cachePath,
-      if (skipPackageUpdatesAndValidation) ...<String>[
-        '-skipPackageUpdates',
+      if (skipPackageValidation) ...<String>[
         '-skipPackagePluginValidation',
         '-skipPackageSignatureValidation',
       ],
@@ -236,43 +210,55 @@ class XcodeProjectInterpreter {
     required XcodeProjectBuildContext buildContext,
     Duration timeout = const Duration(minutes: 1),
   }) async {
-    final Status status = _logger.startSpinner();
-    final String? scheme = buildContext.scheme;
-    final String? configuration = buildContext.configuration;
-    final String? target = buildContext.target;
-    final String? deviceId = buildContext.deviceId;
-    final String buildDir = switch (buildContext.sdk) {
-      XcodeSdk.MacOSX => getMacOSBuildDirectory(),
-      XcodeSdk.IPhoneOS || XcodeSdk.IPhoneSimulator => getIosBuildDirectory(),
-      XcodeSdk.WatchOS || XcodeSdk.WatchSimulator => getIosBuildDirectory(),
+    final ToolContext(
+      :Config config,
+      fs: FileSystem fileSystem,
+      :Logger logger,
+      :Platform platform,
+      :ProcessUtils processUtils,
+    ) = _toolContext;
+    final Status status = logger.startSpinner();
+    final XcodeProjectBuildContext(
+      :String? configuration,
+      :String? deviceId,
+      :String? scheme,
+      :XcodeSdk sdk,
+      :String? target,
+    ) = buildContext;
+    final String buildDir = switch (sdk) {
+      XcodeSdk.MacOSX => getMacOSBuildDirectory(config: config, fileSystem: fileSystem),
+      XcodeSdk.IPhoneOS ||
+      XcodeSdk.IPhoneSimulator => getIosBuildDirectory(config: config, fileSystem: fileSystem),
+      XcodeSdk.WatchOS ||
+      XcodeSdk.WatchSimulator => getIosBuildDirectory(config: config, fileSystem: fileSystem),
     };
     final List<String> xcodebuildCommandArgs = await fetchDependenciesAndGenerateXcodebuildArgs(
       xcodeProject,
-      _fileSystem.directory(buildDir),
+      fileSystem.directory(buildDir),
     );
     final String projectPath = xcodeProject.xcodeProject.path;
     final showBuildSettingsCommand = <String>[
       ...xcodebuildCommandArgs,
       '-project',
-      _fileSystem.path.absolute(projectPath),
+      fileSystem.path.absolute(projectPath),
       if (scheme != null) ...<String>['-scheme', scheme],
       if (configuration != null) ...<String>['-configuration', configuration],
       if (target != null) ...<String>['-target', target],
-      if (buildContext.sdk == XcodeSdk.IPhoneSimulator) ...<String>[
+      if (sdk == XcodeSdk.IPhoneSimulator) ...<String>[
         '-sdk',
         XcodeSdk.IPhoneSimulator.platformName,
       ],
       '-destination',
-      if (deviceId != null) 'id=$deviceId' else buildContext.sdk.genericPlatform,
+      if (deviceId != null) 'id=$deviceId' else sdk.genericPlatform,
       '-showBuildSettings',
-      'BUILD_DIR=${_fileSystem.path.absolute(buildDir)}',
-      ...environmentVariablesAsXcodeBuildSettings(_platform),
+      'BUILD_DIR=${fileSystem.path.absolute(buildDir)}',
+      ...environmentVariablesAsXcodeBuildSettings(platform),
     ];
     try {
       // showBuildSettings is reported to occasionally timeout. Here, we give it
       // a lot of wiggle room (locally on Flutter Gallery, this takes ~1s).
       // When there is a timeout, we retry once.
-      final RunResult result = await _processUtils.run(
+      final RunResult result = await processUtils.run(
         showBuildSettingsCommand,
         throwOnError: true,
         workingDirectory: projectPath,
@@ -283,7 +269,7 @@ class XcodeProjectInterpreter {
       return parseXcodeBuildSettings(out);
     } on Exception catch (error) {
       if (error is ProcessException && error.toString().contains('timed out')) {
-        final String eventType = switch (buildContext.sdk) {
+        final String eventType = switch (sdk) {
           XcodeSdk.MacOSX => 'macos',
           XcodeSdk.IPhoneOS || XcodeSdk.IPhoneSimulator => 'ios',
           XcodeSdk.WatchOS || XcodeSdk.WatchSimulator => 'watchos',
@@ -296,7 +282,7 @@ class XcodeProjectInterpreter {
           ),
         );
       }
-      _logger.printTrace('Unexpected failure to get Xcode build settings: $error.');
+      logger.printTrace('Unexpected failure to get Xcode build settings: $error.');
       return const <String, String>{};
     } finally {
       status.stop();
@@ -314,8 +300,16 @@ class XcodeProjectInterpreter {
       // No plugins.
       return null;
     }
-    final Status status = _logger.startSpinner();
-    final String buildDirectory = _fileSystem.path.absolute(getIosBuildDirectory());
+    final ToolContext(
+      :Config config,
+      fs: FileSystem fileSystem,
+      :Logger logger,
+      :ProcessUtils processUtils,
+    ) = _toolContext;
+    final Status status = logger.startSpinner();
+    final String buildDirectory = fileSystem.path.absolute(
+      getIosBuildDirectory(config: config, fileSystem: fileSystem),
+    );
     final showBuildSettingsCommand = <String>[
       ...xcrunCommand(),
       'xcodebuild',
@@ -332,7 +326,7 @@ class XcodeProjectInterpreter {
       // showBuildSettings is reported to occasionally timeout. Here, we give it
       // a lot of wiggle room (locally on Flutter Gallery, this takes ~1s).
       // When there is a timeout, we retry once.
-      final RunResult result = await _processUtils.run(
+      final RunResult result = await processUtils.run(
         showBuildSettingsCommand,
         throwOnError: true,
         workingDirectory: podXcodeProject.path,
@@ -353,7 +347,7 @@ class XcodeProjectInterpreter {
           ),
         );
       }
-      _logger.printTrace('Unexpected failure to get Pod Xcode project build settings: $error.');
+      logger.printTrace('Unexpected failure to get Pod Xcode project build settings: $error.');
       return null;
     } finally {
       status.stop();
@@ -367,12 +361,14 @@ class XcodeProjectInterpreter {
     required Directory buildDirectory,
     bool verbose = false,
   }) async {
-    final String projectPath = _fileSystem.currentDirectory.path;
+    final ToolContext(fs: FileSystem fileSystem, :Platform platform, :ProcessUtils processUtils) =
+        _toolContext;
+    final String projectPath = fileSystem.currentDirectory.path;
     final List<String> xcodebuildCommandArgs = await fetchDependenciesAndGenerateXcodebuildArgs(
       xcodeProject,
       buildDirectory,
     );
-    await _processUtils.run(<String>[
+    await processUtils.run(<String>[
       ...xcodebuildCommandArgs,
       '-workspace',
       workspacePath,
@@ -380,7 +376,7 @@ class XcodeProjectInterpreter {
       scheme,
       if (!verbose) '-quiet',
       'clean',
-      ...environmentVariablesAsXcodeBuildSettings(_platform),
+      ...environmentVariablesAsXcodeBuildSettings(platform),
     ], workingDirectory: projectPath);
   }
 
@@ -389,15 +385,16 @@ class XcodeProjectInterpreter {
     XcodeBasedProject xcodeProject, {
     required Directory buildDirectory,
   }) async {
+    final ToolContext(:Logger logger, :ProcessUtils processUtils) = _toolContext;
     await xcodeProject.prefetchSwiftPackages(
       xcodebuildProjectCommandArguments: _xcodebuildProjectCommandArguments(
         buildDirectory,
-        // skipPackageUpdatesAndValidation should be false so that when subsequent xcodebuild
+        // skipPackageValidation should be false so that when subsequent xcodebuild
         // commands run, packages should already be resolved, downloaded, updated, and validated.
-        skipPackageUpdatesAndValidation: false,
+        skipPackageValidation: false,
       ),
-      processUtils: _processUtils,
-      logger: _logger,
+      processUtils: processUtils,
+      logger: logger,
     );
   }
 
@@ -413,25 +410,142 @@ class XcodeProjectInterpreter {
     // The exit code returned by 'xcodebuild -list' when the project is corrupted.
     const corruptedProjectExitCode = 74;
     bool allowedFailures(int c) => c == missingProjectExitCode || c == corruptedProjectExitCode;
-    final List<String> xcodebuildCommandArgs = await fetchDependenciesAndGenerateXcodebuildArgs(
-      xcodeProject,
-      buildDirectory,
-    );
-    final RunResult result = await _processUtils.run(
-      <String>[
-        ...xcodebuildCommandArgs,
-        '-list',
-        if (projectFilename != null) ...<String>['-project', projectFilename],
-      ],
-      throwOnError: true,
-      allowedFailures: allowedFailures,
-      workingDirectory: xcodeProject.hostAppRoot.path,
-    );
-    if (allowedFailures(result.exitCode)) {
-      // User configuration error, tool exit instead of crashing.
-      throwToolExit('Unable to get Xcode project information:\n ${result.stderr}');
+    final ToolContext(:Logger logger, :ProcessUtils processUtils) = _toolContext;
+    try {
+      final List<String> xcodebuildCommandArgs = await fetchDependenciesAndGenerateXcodebuildArgs(
+        xcodeProject,
+        buildDirectory,
+      );
+      final RunResult result = await processUtils.run(
+        <String>[
+          ...xcodebuildCommandArgs,
+          '-list',
+          if (projectFilename != null) ...<String>['-project', projectFilename],
+        ],
+        throwOnError: true,
+        allowedFailures: allowedFailures,
+        workingDirectory: xcodeProject.hostAppRoot.path,
+      );
+      if (allowedFailures(result.exitCode)) {
+        // User configuration error, tool exit instead of crashing.
+        throwToolExit('Unable to get Xcode project information:\n ${result.stderr}');
+      }
+      return XcodeProjectInfo.fromXcodeBuildOutput(
+        result.toString(),
+        logger,
+        ignoredSchemes: await _ignoredSwiftPackageSchemes(xcodeProject, buildDirectory),
+      );
+    } on ProcessException catch (exception) {
+      throwToolExit('Unable to get Xcode project information:\n $exception');
     }
-    return XcodeProjectInfo.fromXcodeBuildOutput(result.toString(), _logger);
+  }
+
+  /// Returns scheme-name candidates for Swift packages that should be excluded from
+  /// [XcodeProjectInfo.schemes] to avoid expensive iterations through the scheme list, such as
+  /// during `flutter clean` or during [IosProject.containsWatchCompanion].
+  ///
+  /// Local Swift packages are automatically included by Xcode in `xcodebuild -list` despite not
+  /// being declared in the host `.xcodeproj`. Remote Swift packages may also be included (see
+  /// [_swiftPackageCheckoutSchemes]).
+  ///
+  /// Covers Flutter's generated SwiftPM packages, plugin names in snake_case
+  /// and dashed forms, and transitive SwiftPM checkout schemes.
+  Future<Set<String>> _ignoredSwiftPackageSchemes(
+    XcodeBasedProject xcodeProject,
+    Directory buildDirectory,
+  ) async {
+    final ignoredSchemes = <String>{
+      kFlutterGeneratedPluginSwiftPackageName,
+      kFlutterGeneratedFrameworkSwiftPackageTargetName,
+      ..._swiftPackageCheckoutSchemes(buildDirectory),
+      ..._localSwiftPackageSchemes(xcodeProject),
+    };
+    try {
+      for (final Plugin plugin in await xcodeProject.getPlugins()) {
+        ignoredSchemes.add(plugin.name);
+        ignoredSchemes.add(plugin.name.replaceAll('_', '-'));
+      }
+    } on Object catch (error) {
+      _toolContext.logger.printTrace('Failed to get plugins while filtering Xcode schemes: $error');
+    }
+    return ignoredSchemes;
+  }
+
+  /// Returns scheme names contributed by local Swift package references
+  /// declared directly in the host project's `project.pbxproj`.
+  ///
+  /// Like remote checkouts (see [_swiftPackageCheckoutSchemes]), a local
+  /// Swift package that ships its own `.swiftpm/xcode/xcshareddata/xcschemes/`
+  /// directory has those schemes auto-merged into the host project's scheme
+  /// list by Xcode, despite not being declared as a scheme in the host
+  /// `.xcodeproj` itself.
+  Set<String> _localSwiftPackageSchemes(XcodeBasedProject xcodeProject) {
+    final File pbxprojFile = xcodeProject.xcodeProjectInfoFile;
+    if (!pbxprojFile.existsSync()) {
+      return const <String>{};
+    }
+    final schemes = <String>{};
+    String contents;
+    try {
+      contents = pbxprojFile.readAsStringSync();
+    } on FileSystemException catch (error) {
+      _toolContext.logger.printTrace(
+        'Failed to read ${pbxprojFile.path} while filtering Xcode schemes: $error',
+      );
+      return const <String>{};
+    }
+    for (final RegExpMatch match in _localSwiftPackageReferenceExpr.allMatches(contents)) {
+      final String? relativePath = (match.group(1) ?? match.group(2))?.trim();
+      if (relativePath == null || relativePath.isEmpty) {
+        continue;
+      }
+      final Directory packageDirectory = xcodeProject.hostAppRoot.childDirectory(relativePath);
+      schemes.addAll(_schemesFromSwiftPackageSchemeDirectory(packageDirectory));
+    }
+    return schemes;
+  }
+
+  /// Returns the names of any `.xcscheme` files found in [packageDirectory]'s
+  /// `.swiftpm/xcode/xcshareddata/xcschemes` directory, if present.
+  Set<String> _schemesFromSwiftPackageSchemeDirectory(Directory packageDirectory) {
+    final Directory schemeDirectory = packageDirectory
+        .childDirectory('.swiftpm')
+        .childDirectory('xcode')
+        .childDirectory('xcshareddata')
+        .childDirectory('xcschemes');
+    if (!schemeDirectory.existsSync()) {
+      return const <String>{};
+    }
+    final FileSystem fileSystem = _toolContext.fs;
+    final schemes = <String>{};
+    for (final File schemeFile in schemeDirectory.listSync().whereType<File>()) {
+      if (fileSystem.path.extension(schemeFile.path) == '.xcscheme') {
+        schemes.add(fileSystem.path.basenameWithoutExtension(schemeFile.path));
+      }
+    }
+    return schemes;
+  }
+
+  /// Returns scheme names contributed by direct and transitive Swift package checkouts.
+  ///
+  /// When a Swift package ships its own `.swiftpm/xcode/xcshareddata/xcschemes/`
+  /// directory, Xcode auto-merges those schemes into the host project's scheme
+  /// list, so they appear in `xcodebuild -list` despite not being declared in
+  /// the host `.xcodeproj`. See
+  /// https://www.jessesquires.com/blog/2025/03/10/swiftpm-schemes-in-xcode/.
+  Set<String> _swiftPackageCheckoutSchemes(Directory buildDirectory) {
+    final Directory checkoutsDirectory = buildDirectory
+        .childDirectory(kSwiftPackageCacheDirectoryName)
+        .childDirectory('checkouts');
+    if (!checkoutsDirectory.existsSync()) {
+      return const <String>{};
+    }
+    final schemes = <String>{};
+    for (final Directory checkoutDirectory
+        in checkoutsDirectory.listSync().whereType<Directory>()) {
+      schemes.addAll(_schemesFromSwiftPackageSchemeDirectory(checkoutDirectory));
+    }
+    return schemes;
   }
 }
 
@@ -548,7 +662,17 @@ class XcodeProjectInfo {
   const XcodeProjectInfo(this.targets, this.buildConfigurations, this.schemes, Logger logger)
     : _logger = logger;
 
-  factory XcodeProjectInfo.fromXcodeBuildOutput(String output, Logger logger) {
+  /// Parses the output of `xcodebuild -list`.
+  ///
+  /// [ignoredSchemes] is matched case-insensitively against parsed schemes.
+  factory XcodeProjectInfo.fromXcodeBuildOutput(
+    String output,
+    Logger logger, {
+    Set<String> ignoredSchemes = const <String>{},
+  }) {
+    final ignoredSchemeLookup = <String>{
+      for (final String scheme in ignoredSchemes) scheme.toLowerCase(),
+    };
     final targets = <String>[];
     final buildConfigurations = <String>[];
     final schemes = <String>[];
@@ -569,6 +693,7 @@ class XcodeProjectInfo {
       }
       collector?.add(line.trim());
     }
+    schemes.removeWhere((String scheme) => ignoredSchemeLookup.contains(scheme.toLowerCase()));
     if (schemes.isEmpty) {
       schemes.add('Runner');
     }
@@ -597,13 +722,13 @@ class XcodeProjectInfo {
     return '$baseConfiguration-$scheme';
   }
 
-  /// Checks whether the [buildConfigurations] contains the specified string, without
-  /// regard to case.
-  String? _existingBuildConfigurationForBuildMode(String buildMode) {
-    buildMode = buildMode.toLowerCase();
-    for (final String name in buildConfigurations) {
-      if (name.toLowerCase() == buildMode) {
-        return name;
+  /// Finds a build configuration matching [name], ignoring case,
+  /// and returns it, or null if there is no match.
+  String? _existingBuildConfigurationWithName(String name) {
+    name = name.toLowerCase();
+    for (final String configName in buildConfigurations) {
+      if (configName.toLowerCase() == name) {
+        return configName;
       }
     }
     return null;
@@ -633,28 +758,34 @@ class XcodeProjectInfo {
     }
   }
 
-  /// Returns unique build configuration matching [buildInfo] and [scheme], or
-  /// null, if there is no unique best match.
+  /// Returns unique build configuration matching [buildInfo] and [scheme],
+  /// falling back to the base configuration, or null, if there is no unique best match.
   String? buildConfigurationFor(BuildInfo? buildInfo, String scheme) {
     if (buildInfo == null) {
       return null;
     }
     final String expectedConfiguration = expectedBuildConfigurationFor(buildInfo, scheme);
-    final String? buildConfigurationForBuildMode = _existingBuildConfigurationForBuildMode(
-      expectedConfiguration,
-    );
-    if (buildConfigurationForBuildMode != null) {
-      return buildConfigurationForBuildMode;
+    // Check for an exact match, e.g. "Debug-MyFlavor" if using a flavor or "Debug" if not.
+    final String? exactMatch = _existingBuildConfigurationWithName(expectedConfiguration);
+    if (exactMatch != null || buildInfo.flavor == null) {
+      return exactMatch;
     }
     final String baseConfiguration = _baseConfigurationFor(buildInfo);
-    return _uniqueMatch(buildConfigurations, (String candidate) {
+    // Check for fuzzy matches for build mode and flavor, e.g. "debug myflavor".
+    final List<String> matchesForBuildModeAndFlavor = buildConfigurations.where((String candidate) {
       candidate = candidate.toLowerCase();
-      if (buildInfo.flavor == null) {
-        return candidate == expectedConfiguration.toLowerCase();
-      }
       return candidate.contains(baseConfiguration.toLowerCase()) &&
           candidate.contains(scheme.toLowerCase());
-    });
+    }).toList();
+    // If there is exactly one match for build mode and flavor, return it.
+    // If there are multiple, the user most likely has a misconfigured project.
+    if (matchesForBuildModeAndFlavor.length == 1) {
+      return matchesForBuildModeAndFlavor.first;
+    } else if (matchesForBuildModeAndFlavor.length > 1) {
+      return null;
+    }
+    // Fall back to the base configuration if no match is found.
+    return _existingBuildConfigurationWithName(baseConfiguration);
   }
 
   static String _baseConfigurationFor(BuildInfo buildInfo) {

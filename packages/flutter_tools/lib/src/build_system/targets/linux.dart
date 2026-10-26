@@ -94,7 +94,7 @@ abstract class BundleLinuxAssets extends Target {
 
   @override
   List<Target> get dependencies => <Target>[
-    const DartBuildForNative(),
+    const LinkHooks(),
     const KernelSnapshot(),
     const InstallCodeAssets(),
     UnpackLinux(targetPlatform),
@@ -104,7 +104,7 @@ abstract class BundleLinuxAssets extends Target {
   List<Source> get inputs => const <Source>[
     Source.pattern('{FLUTTER_ROOT}/packages/flutter_tools/lib/src/build_system/targets/linux.dart'),
     Source.pattern('{PROJECT_DIR}/pubspec.yaml'),
-    Source.pattern('{BUILD_DIR}/${DartBuild.dartHookResultFilename}'),
+    Source.pattern('{BUILD_DIR}/${LinkHooks.resultFilename}'),
     ...IconTreeShaker.inputs,
   ];
 
@@ -130,13 +130,14 @@ abstract class BundleLinuxAssets extends Target {
           .copySync(outputDirectory.childFile('kernel_blob.bin').path);
     }
     final String versionInfo = getVersionInfo(environment.defines);
-    final DartHooksResult dartHookResult = await DartBuild.loadHookResult(environment);
+    final DartHooksResult dartHookResult = await LinkHooks.loadHookResult(environment);
     final Depfile depfile = await copyAssets(
       environment,
       outputDirectory,
       dartHookResult: dartHookResult,
       targetPlatform: targetPlatform,
       buildMode: buildMode,
+      flavor: environment.defines[kFlavor],
       additionalContent: <String, DevFSContent>{
         'version.json': DevFSStringContent(versionInfo),
         'NativeAssetsManifest.json': DevFSFileContent(
@@ -172,8 +173,8 @@ class LinuxAotBundle extends Target {
   /// Create a [LinuxAotBundle] wrapper for [aotTarget].
   const LinuxAotBundle(this.aotTarget);
 
-  /// The [AotElfBase] subclass that produces the app.so.
-  final AotElfBase aotTarget;
+  /// The [AotSnapshotBase] subclass that produces the app.so.
+  final AotSnapshotBase aotTarget;
 
   @override
   String get name => 'linux_aot_bundle';
@@ -202,7 +203,7 @@ class DebugBundleLinuxAssets extends BundleLinuxAssets {
   const DebugBundleLinuxAssets(super.targetPlatform);
 
   @override
-  String get name => 'debug_bundle_${getNameForTargetPlatform(targetPlatform)}_assets';
+  String get name => 'debug_bundle_${targetPlatform.getName()}_assets';
 
   @override
   List<Source> get inputs => <Source>[const Source.pattern('{BUILD_DIR}/app.dill')];
@@ -217,7 +218,7 @@ class ProfileBundleLinuxAssets extends BundleLinuxAssets {
   const ProfileBundleLinuxAssets(super.targetPlatform);
 
   @override
-  String get name => 'profile_bundle_${getNameForTargetPlatform(targetPlatform)}_assets';
+  String get name => 'profile_bundle_${targetPlatform.getName()}_assets';
 
   @override
   List<Source> get outputs => const <Source>[];
@@ -225,7 +226,7 @@ class ProfileBundleLinuxAssets extends BundleLinuxAssets {
   @override
   List<Target> get dependencies => <Target>[
     ...super.dependencies,
-    LinuxAotBundle(AotElfProfile(targetPlatform)),
+    LinuxAotBundle(AotSnapshotProfile(targetPlatform)),
   ];
 }
 
@@ -233,7 +234,7 @@ class ReleaseBundleLinuxAssets extends BundleLinuxAssets {
   const ReleaseBundleLinuxAssets(super.targetPlatform);
 
   @override
-  String get name => 'release_bundle_${getNameForTargetPlatform(targetPlatform)}_assets';
+  String get name => 'release_bundle_${targetPlatform.getName()}_assets';
 
   @override
   List<Source> get outputs => const <Source>[];
@@ -241,6 +242,6 @@ class ReleaseBundleLinuxAssets extends BundleLinuxAssets {
   @override
   List<Target> get dependencies => <Target>[
     ...super.dependencies,
-    LinuxAotBundle(AotElfRelease(targetPlatform)),
+    LinuxAotBundle(AotSnapshotRelease(targetPlatform)),
   ];
 }

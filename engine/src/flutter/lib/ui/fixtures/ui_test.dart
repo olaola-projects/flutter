@@ -528,6 +528,17 @@ void platformMessagePortResponseTest() async {
   }
 }
 
+/// Responds to a port that has already been closed, simulating an isolate
+/// that exits before the platform replies.
+@pragma('vm:entry-point')
+void platformMessagePortResponseClosedPortTest() {
+  final receivePort = ReceivePort();
+  final int nativePort = receivePort.sendPort.nativePort;
+  receivePort.close();
+  _callPlatformMessageResponseDartPort(nativePort);
+  _finishCallResponse(true);
+}
+
 @pragma('vm:entry-point')
 void platformMessageResponseTest() {
   _callPlatformMessageResponseDart((ByteData? result) {
@@ -683,6 +694,31 @@ Future<void> toByteDataRetryOverflows() async {
   _validateNotNull(result);
 }
 
+@pragma('vm:external-name', 'SceneToImageResult')
+external void _sceneToImageResult(int width, int height, String? error);
+
+/// Reproduction from https://github.com/flutter/flutter/issues/192365: a
+/// `Scene.toImage` while the view has no window surface (on Android, before
+/// `SurfaceView.surfaceCreated`).
+@pragma('vm:entry-point')
+Future<void> sceneToImageWithoutSurface() async {
+  final PictureRecorder recorder = PictureRecorder();
+  Canvas(recorder)
+      .drawRect(const Rect.fromLTWH(0, 0, 8, 8), Paint()..color = const Color(0xFF2ADEC3));
+  final Picture picture = recorder.endRecording();
+  final Scene scene = (SceneBuilder()..addPicture(Offset.zero, picture)).build();
+  try {
+    final Image image = await scene.toImage(8, 8);
+    _sceneToImageResult(image.width, image.height, null);
+    image.dispose();
+  } catch (error) {
+    _sceneToImageResult(0, 0, error.toString());
+  } finally {
+    scene.dispose();
+    picture.dispose();
+  }
+}
+
 @pragma('vm:entry-point')
 Future<void> toImageRetries() async {
   final PictureRecorder pictureRecorder = PictureRecorder();
@@ -810,11 +846,18 @@ void convertPaintToDlPaint() {
   paint.colorFilter = ColorFilter.mode(Color.fromARGB(0x55, 0x66, 0x77, 0x88), BlendMode.xor);
   paint.maskFilter = MaskFilter.blur(BlurStyle.inner, .75);
   paint.style = PaintingStyle.stroke;
+  paint.isAntiAlias = false;
   _convertPaintToDlPaint(paint);
 }
 
 @pragma('vm:external-name', 'ConvertPaintToDlPaint')
 external void _convertPaintToDlPaint(Paint paint);
+
+@pragma('vm:entry-point')
+void convertDefaultPaintToDlPaint() {
+  Paint paint = Paint();
+  _convertPaintToDlPaint(paint);
+}
 
 /// Hooks for platform_configuration_unittests.cc
 @pragma('vm:entry-point')

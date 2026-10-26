@@ -11,8 +11,8 @@
 #include <unordered_map>
 #include <utility>
 
+#include "flutter/display_list/image/dl_image.h"
 #include "flutter/fml/logging.h"
-#include "flutter/fml/status_or.h"
 #include "impeller/base/validation.h"
 #include "impeller/core/formats.h"
 #include "impeller/core/host_buffer.h"
@@ -25,6 +25,7 @@
 #include "impeller/renderer/render_target.h"
 #include "impeller/typographer/lazy_glyph_atlas.h"
 #include "impeller/typographer/typographer_context.h"
+#include "third_party/abseil-cpp/absl/status/statusor.h"
 
 namespace impeller {
 /// Pipeline state configuration.
@@ -148,7 +149,6 @@ class ContentContext {
   PipelineRef GetBlendSaturationPipeline(ContentContextOptions opts) const;
   PipelineRef GetBlendScreenPipeline(ContentContextOptions opts) const;
   PipelineRef GetBlendSoftLightPipeline(ContentContextOptions opts) const;
-  PipelineRef GetBorderMaskBlurPipeline(ContentContextOptions opts) const;
   PipelineRef GetCirclePipeline(ContentContextOptions opts) const;
   PipelineRef GetClearBlendPipeline(ContentContextOptions opts) const;
   PipelineRef GetClipPipeline(ContentContextOptions opts) const;
@@ -183,7 +183,6 @@ class ContentContext {
   PipelineRef GetFramebufferBlendSoftLightPipeline(ContentContextOptions opts) const;
   PipelineRef GetGaussianBlurPipeline(ContentContextOptions opts) const;
   PipelineRef GetGlyphAtlasPipeline(ContentContextOptions opts) const;
-  PipelineRef GetLinePipeline(ContentContextOptions opts) const;
   PipelineRef GetLinearGradientFillPipeline(ContentContextOptions opts) const;
   PipelineRef GetLinearGradientSSBOFillPipeline(ContentContextOptions opts) const;
   PipelineRef GetLinearGradientUniformFillPipeline(ContentContextOptions opts) const;
@@ -197,7 +196,6 @@ class ContentContext {
   PipelineRef GetRadialGradientUniformFillPipeline(ContentContextOptions opts) const;
   PipelineRef GetRRectBlurPipeline(ContentContextOptions opts) const;
   PipelineRef GetRSuperellipseBlurPipeline(ContentContextOptions opts) const;
-  PipelineRef GetScreenBlendPipeline(ContentContextOptions opts) const;
   PipelineRef GetSolidFillPipeline(ContentContextOptions opts) const;
   PipelineRef GetSourceATopBlendPipeline(ContentContextOptions opts) const;
   PipelineRef GetSourceBlendPipeline(ContentContextOptions opts) const;
@@ -214,6 +212,8 @@ class ContentContext {
   PipelineRef GetXorBlendPipeline(ContentContextOptions opts) const;
   PipelineRef GetYUVToRGBFilterPipeline(ContentContextOptions opts) const;
   PipelineRef GetUberSDFPipeline(ContentContextOptions opts) const;
+  PipelineRef GetUberSDFSSBOPipeline(ContentContextOptions opts) const;
+  PipelineRef GetComplexRSEPipeline(ContentContextOptions opts) const;
 #ifdef IMPELLER_ENABLE_OPENGLES
 #if !defined(FML_OS_EMSCRIPTEN)
   PipelineRef GetTiledTextureExternalPipeline(ContentContextOptions opts) const;
@@ -236,7 +236,7 @@ class ContentContext {
 
   /// @brief  Creates a new texture of size `texture_size` and calls
   ///         `subpass_callback` with a `RenderPass` for drawing to the texture.
-  fml::StatusOr<RenderTarget> MakeSubpass(
+  absl::StatusOr<RenderTarget> MakeSubpass(
       std::string_view label,
       ISize texture_size,
       const std::shared_ptr<CommandBuffer>& command_buffer,
@@ -246,7 +246,7 @@ class ContentContext {
       int32_t mip_count = 1) const;
 
   /// Makes a subpass that will render to `subpass_target`.
-  fml::StatusOr<RenderTarget> MakeSubpass(
+  absl::StatusOr<RenderTarget> MakeSubpass(
       std::string_view label,
       const RenderTarget& subpass_target,
       const std::shared_ptr<CommandBuffer>& command_buffer,
@@ -279,6 +279,26 @@ class ContentContext {
   /// GetCachedRuntimeEffectPipeline.
   void ClearCachedRuntimeEffectPipeline(
       const std::string& unique_entrypoint_name) const;
+
+  /// @brief Enable or disable texture caching.
+  void SetTextureCachingEnabled(bool enabled);
+
+  /// @brief Get a cached texture for the given image.
+  std::shared_ptr<Texture> GetCachedTexture(
+      const flutter::DlImage* image) const;
+
+  /// @brief Set a cached texture for the given image.
+  void SetCachedTexture(const flutter::DlImage* image,
+                        const std::shared_ptr<Texture>& texture) const;
+
+  /// @brief Remove a cached texture for the given image.
+  void RemoveCachedTexture(const flutter::DlImage* image) const;
+
+  /// @brief Clear all cached textures.
+  void ClearCachedTextures() const;
+
+  /// @brief Clear all cached render targets from the render target cache.
+  void ClearRenderTargetCache() const;
 
   /// @brief Retrieve the current host buffer for transient storage of indexes
   ///        used for indexed draws.
@@ -363,6 +383,10 @@ class ContentContext {
   std::shared_ptr<HostBuffer> indexes_host_buffer_;
   std::shared_ptr<Texture> empty_texture_;
   std::unique_ptr<TextShadowCache> text_shadow_cache_;
+
+  bool is_texture_caching_enabled_ = false;
+  mutable std::unordered_map<const flutter::DlImage*, std::shared_ptr<Texture>>
+      texture_cache_;
 
   ContentContext(const ContentContext&) = delete;
 

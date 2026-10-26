@@ -5,9 +5,11 @@
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import '../widgets/button_tester.dart';
 
 typedef SemanticsNodeUpdateObservation = ({
   String label,
@@ -17,6 +19,7 @@ typedef SemanticsNodeUpdateObservation = ({
   String hint,
   List<StringAttribute>? hintAttributes,
   Int32List childrenInTraversalOrder,
+  Int32List childrenInHitTestOrder,
   Float64List transform,
 });
 
@@ -208,20 +211,20 @@ void main() {
       builder: (BuildContext context) {
         return OverlayPortal(
           controller: controller1,
-          child: TextButton(onPressed: () {}, child: const Text('a')),
+          child: TestButton(onPressed: () {}, child: const Text('a')),
           overlayChildBuilder: (BuildContext context) {
             return Positioned(
               left: 10,
               top: 11,
               child: OverlayPortal(
                 controller: controller2,
-                child: TextButton(onPressed: () {}, child: const Text('b')),
+                child: TestButton(onPressed: () {}, child: const Text('b')),
                 overlayChildBuilder: (BuildContext context) {
                   // (100, 200) in 'b's coordinates.
                   return Positioned(
                     left: 110,
                     top: 211,
-                    child: TextButton(onPressed: () {}, child: const Text('c')),
+                    child: TestButton(onPressed: () {}, child: const Text('c')),
                   );
                 },
               ),
@@ -264,6 +267,362 @@ void main() {
     SemanticsUpdateBuilderSpy.observations.clear();
     handle.dispose();
   }, skip: kIsWeb); // intended: the web engine handles the transform calculation itself.
+
+  testWidgets(
+    'Semantics update does not leak nodes to hit-test order when traversal parent is missing',
+    (WidgetTester tester) async {
+      final SemanticsHandle handle = tester.ensureSemantics();
+      // Pumps a placeholder to trigger the warm up frame.
+      await tester.pumpWidget(const Placeholder(), phase: EnginePhase.build);
+      SemanticsUpdateBuilderSpy.observations.clear();
+
+      const identifier = '111';
+      await tester.pumpWidget(
+        Directionality(
+          textDirection: TextDirection.ltr,
+          child: Column(
+            children: <Widget>[
+              Semantics(
+                traversalChildIdentifier: identifier,
+                child: const SizedBox.square(dimension: 10),
+              ),
+              const SizedBox.square(dimension: 10),
+            ],
+          ),
+        ),
+      );
+
+      // SemanticsNode#0 (root) should have 0 children in both traversal order and hit-test order,
+      // and the orphan traversal child should not be sent in the update.
+      expect(SemanticsUpdateBuilderSpy.observations.keys, equals(<int>[0]));
+      final SemanticsNodeUpdateObservation? rootObservation =
+          SemanticsUpdateBuilderSpy.observations[0];
+      expect(rootObservation, isNotNull);
+      expect(rootObservation!.childrenInTraversalOrder, isEmpty);
+      expect(rootObservation.childrenInHitTestOrder, isEmpty);
+
+      SemanticsUpdateBuilderSpy.observations.clear();
+      handle.dispose();
+    },
+    skip: kIsWeb, // [intended] the web engine handles the tree grafting itself.
+  );
+
+  testWidgets(
+    'Semantics update skips OverlayPortal traversal child while anchor is hidden by Opacity and sends it when anchor becomes visible',
+    (WidgetTester tester) async {
+      final SemanticsHandle handle = tester.ensureSemantics();
+      await tester.pumpWidget(const Placeholder(), phase: EnginePhase.build);
+      SemanticsUpdateBuilderSpy.observations.clear();
+
+      final controller = OverlayPortalController()..show();
+      final opacity = ValueNotifier<double>(0.0);
+      addTearDown(opacity.dispose);
+
+      final entry = OverlayEntry(
+        builder: (BuildContext context) {
+          return ValueListenableBuilder<double>(
+            valueListenable: opacity,
+            builder: (BuildContext context, double value, Widget? child) {
+              return Opacity(
+                opacity: value,
+                child: OverlayPortal(
+                  controller: controller,
+                  overlayChildBuilder: (BuildContext context) {
+                    return TestButton(onPressed: () {}, child: const Text('portal child'));
+                  },
+                  child: TestButton(onPressed: () {}, child: const Text('anchor')),
+                ),
+              );
+            },
+          );
+        },
+      );
+      addTearDown(() {
+        entry
+          ..remove()
+          ..dispose();
+      });
+
+      // Frame 1: opacity is 0.0, so the anchor (traversal parent) is excluded from semantics,
+      // while the OverlayPortal's deferred layout box (traversal child) is mounted on the Overlay.
+      // No orphan nodes should be sent in the semantics update.
+      await tester.pumpWidget(
+        Directionality(
+          textDirection: TextDirection.ltr,
+          child: Overlay(initialEntries: <OverlayEntry>[entry]),
+        ),
+      );
+
+      expect(SemanticsUpdateBuilderSpy.observations.keys, equals(<int>[0]));
+      expect(SemanticsUpdateBuilderSpy.observations[0]!.childrenInTraversalOrder, isEmpty);
+      expect(SemanticsUpdateBuilderSpy.observations[0]!.childrenInHitTestOrder, isEmpty);
+
+      // Frame 2: opacity becomes 1.0, so the anchor (traversal parent) enters the semantics tree.
+      // The root node, anchor, traversal child, and portal child button should all be updated
+      // and connected without any orphan nodes.
+      SemanticsUpdateBuilderSpy.observations.clear();
+      opacity.value = 1.0;
+      await tester.pump();
+
+      final allChildIdsInTraversalOrder = <int>{
+        for (final SemanticsNodeUpdateObservation obs
+            in SemanticsUpdateBuilderSpy.observations.values)
+          ...obs.childrenInTraversalOrder,
+      };
+      final allChildIdsInHitTestOrder = <int>{
+        for (final SemanticsNodeUpdateObservation obs
+            in SemanticsUpdateBuilderSpy.observations.values)
+          ...obs.childrenInHitTestOrder,
+      };
+      for (final int id in SemanticsUpdateBuilderSpy.observations.keys) {
+        if (id != 0) {
+          expect(
+            allChildIdsInTraversalOrder,
+            contains(id),
+            reason: 'Node $id should be reachable in traversal order',
+          );
+          expect(
+            allChildIdsInHitTestOrder,
+            contains(id),
+            reason: 'Node $id should be reachable in hit-test order',
+          );
+        }
+      }
+      expect(
+        SemanticsUpdateBuilderSpy.observations.values.any(
+          (SemanticsNodeUpdateObservation obs) => obs.label == 'anchor',
+        ),
+        isTrue,
+      );
+      expect(
+        SemanticsUpdateBuilderSpy.observations.values.any(
+          (SemanticsNodeUpdateObservation obs) => obs.label == 'portal child',
+        ),
+        isTrue,
+      );
+
+      // Frame 3: opacity becomes 0.0 again, detaching the traversal parent while the
+      // OverlayPortal's deferred layout box remains attached to the Overlay.
+      // The root node should update its hit-test and traversal children to be empty.
+      SemanticsUpdateBuilderSpy.observations.clear();
+      opacity.value = 0.0;
+      await tester.pump();
+
+      expect(SemanticsUpdateBuilderSpy.observations.keys, equals(<int>[0]));
+      expect(SemanticsUpdateBuilderSpy.observations[0]!.childrenInTraversalOrder, isEmpty);
+      expect(SemanticsUpdateBuilderSpy.observations[0]!.childrenInHitTestOrder, isEmpty);
+
+      SemanticsUpdateBuilderSpy.observations.clear();
+      handle.dispose();
+    },
+    skip: kIsWeb, // [intended] the web engine handles the tree grafting itself.
+  );
+
+  testWidgets('Semantics update removes detached OverlayPortal traversal child', (
+    WidgetTester tester,
+  ) async {
+    final SemanticsHandle handle = tester.ensureSemantics();
+    await tester.pumpWidget(const Placeholder(), phase: EnginePhase.build);
+    SemanticsUpdateBuilderSpy.observations.clear();
+
+    final controller = OverlayPortalController()..show();
+    final entry = OverlayEntry(
+      builder: (BuildContext context) {
+        return OverlayPortal(
+          controller: controller,
+          child: TestButton(onPressed: () {}, child: const Text('anchor')),
+          overlayChildBuilder: (BuildContext context) {
+            return TestButton(onPressed: () {}, child: const Text('menu item'));
+          },
+        );
+      },
+    );
+    addTearDown(() {
+      entry
+        ..remove()
+        ..dispose();
+    });
+
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: Overlay(initialEntries: <OverlayEntry>[entry]),
+      ),
+    );
+
+    final int anchorId = SemanticsUpdateBuilderSpy.observations.entries.singleWhere((
+      MapEntry<int, SemanticsNodeUpdateObservation> entry,
+    ) {
+      return entry.value.label == 'anchor';
+    }).key;
+    final int menuItemId = SemanticsUpdateBuilderSpy.observations.entries.singleWhere((
+      MapEntry<int, SemanticsNodeUpdateObservation> entry,
+    ) {
+      return entry.value.label == 'menu item';
+    }).key;
+    expect(
+      SemanticsUpdateBuilderSpy.observations.values.any((
+        SemanticsNodeUpdateObservation observation,
+      ) {
+        return observation.childrenInTraversalOrder.contains(menuItemId);
+      }),
+      isTrue,
+    );
+
+    SemanticsUpdateBuilderSpy.observations.clear();
+    controller.hide();
+    await tester.pump();
+
+    expect(SemanticsUpdateBuilderSpy.observations.containsKey(menuItemId), isFalse);
+    expect(
+      SemanticsUpdateBuilderSpy.observations.values.any((
+        SemanticsNodeUpdateObservation observation,
+      ) {
+        return listEquals(observation.childrenInTraversalOrder, <int>[anchorId]);
+      }),
+      isTrue,
+    );
+    expect(
+      SemanticsUpdateBuilderSpy.observations.values.any((
+        SemanticsNodeUpdateObservation observation,
+      ) {
+        return observation.childrenInTraversalOrder.contains(menuItemId);
+      }),
+      isFalse,
+    );
+    SemanticsUpdateBuilderSpy.observations.clear();
+    handle.dispose();
+  }, skip: kIsWeb); // intended: the web engine handles the traversal order itself.
+
+  // Regression test for https://github.com/flutter/flutter/issues/190357.
+  testWidgets(
+    'Semantics update does not serialize orphan nodes when pushing and popping a route with OverlayPortal',
+    (WidgetTester tester) async {
+      final SemanticsHandle handle = tester.ensureSemantics();
+      await tester.pumpWidget(const Placeholder(), phase: EnginePhase.build);
+      SemanticsUpdateBuilderSpy.observations.clear();
+
+      final activeTree = <int, SemanticsNodeUpdateObservation>{};
+
+      void verifyAndCommitUpdate() {
+        if (SemanticsUpdateBuilderSpy.observations.isEmpty) {
+          return;
+        }
+        activeTree.addAll(SemanticsUpdateBuilderSpy.observations);
+
+        final reachableInTraversal = <int>{};
+        void walkTraversal(int id) {
+          expect(
+            activeTree.containsKey(id),
+            isTrue,
+            reason: 'Node $id referenced in childrenInTraversalOrder was never sent in an update',
+          );
+          if (!reachableInTraversal.add(id)) {
+            return;
+          }
+          activeTree[id]!.childrenInTraversalOrder.forEach(walkTraversal);
+        }
+
+        final reachableInHitTest = <int>{};
+        void walkHitTest(int id) {
+          expect(
+            activeTree.containsKey(id),
+            isTrue,
+            reason: 'Node $id referenced in childrenInHitTestOrder was never sent in an update',
+          );
+          if (!reachableInHitTest.add(id)) {
+            return;
+          }
+          activeTree[id]!.childrenInHitTestOrder.forEach(walkHitTest);
+        }
+
+        walkTraversal(0);
+        walkHitTest(0);
+
+        for (final int updatedId in SemanticsUpdateBuilderSpy.observations.keys) {
+          expect(
+            reachableInTraversal,
+            contains(updatedId),
+            reason: 'Updated node $updatedId is an orphan in traversal order',
+          );
+          expect(
+            reachableInHitTest,
+            contains(updatedId),
+            reason: 'Updated node $updatedId is an orphan in hit-test order',
+          );
+        }
+        expect(reachableInTraversal, equals(reachableInHitTest));
+
+        activeTree.removeWhere((int id, _) => !reachableInTraversal.contains(id));
+        SemanticsUpdateBuilderSpy.observations.clear();
+      }
+
+      final navigatorKey = GlobalKey<NavigatorState>();
+      final portalController = OverlayPortalController()..show();
+
+      await tester.pumpWidget(
+        WidgetsApp(
+          navigatorKey: navigatorKey,
+          color: const Color(0xFF000000),
+          onGenerateRoute: (RouteSettings settings) {
+            return PageRouteBuilder<void>(
+              pageBuilder:
+                  (
+                    BuildContext context,
+                    Animation<double> animation,
+                    Animation<double> secondaryAnimation,
+                  ) {
+                    return TestButton(onPressed: () {}, child: const Text('home'));
+                  },
+            );
+          },
+        ),
+      );
+      verifyAndCommitUpdate();
+
+      // Push a route whose transition starts at opacity 0.0 (like MaterialPageRoute / showDialog)
+      // and contains an active OverlayPortal (like Material Slider).
+      navigatorKey.currentState!.push(
+        PageRouteBuilder<void>(
+          pageBuilder:
+              (
+                BuildContext context,
+                Animation<double> animation,
+                Animation<double> secondaryAnimation,
+              ) {
+                return FadeTransition(
+                  opacity: animation,
+                  child: OverlayPortal(
+                    controller: portalController,
+                    overlayChildBuilder: (BuildContext context) => const SizedBox.shrink(),
+                    child: TestButton(onPressed: () {}, child: const Text('pushed slider')),
+                  ),
+                );
+              },
+        ),
+      );
+
+      // Step through every frame of the push transition.
+      for (var i = 0; i < 10; i++) {
+        await tester.pump(const Duration(milliseconds: 50));
+        verifyAndCommitUpdate();
+      }
+      expect(
+        activeTree.values.any((SemanticsNodeUpdateObservation obs) => obs.label == 'pushed slider'),
+        isTrue,
+      );
+
+      // Pop the route and step through every frame of the reverse transition.
+      navigatorKey.currentState!.pop();
+      for (var i = 0; i < 10; i++) {
+        await tester.pump(const Duration(milliseconds: 50));
+        verifyAndCommitUpdate();
+      }
+
+      handle.dispose();
+    },
+    skip: kIsWeb, // [intended] the web engine handles the traversal order itself.
+  );
 }
 
 class SemanticsUpdateTestBinding extends AutomatedTestWidgetsFlutterBinding {
@@ -335,6 +694,7 @@ class SemanticsUpdateBuilderSpy extends Fake implements ui.SemanticsUpdateBuilde
       value: value,
       valueAttributes: valueAttributes,
       childrenInTraversalOrder: childrenInTraversalOrder,
+      childrenInHitTestOrder: childrenInHitTestOrder,
       transform: transform,
     );
   }

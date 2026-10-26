@@ -19,7 +19,7 @@ namespace flutter {
 
 namespace {
 
-sk_sp<DlImage> DoMakeRasterSnapshot(
+std::shared_ptr<impeller::Texture> DoMakeRasterSnapshot(
     const sk_sp<DisplayList>& display_list,
     DlISize size,
     const std::shared_ptr<impeller::AiksContext>& context,
@@ -61,45 +61,89 @@ sk_sp<DlImage> DoMakeRasterSnapshot(
       break;
   }
 
-  return impeller::DlImageImpeller::Make(
-      impeller::DisplayListToTexture(display_list, render_target_size, *context,
-                                     /*reset_host_buffer=*/false,
-                                     /*generate_mips=*/true,
-                                     impeller_pixel_format),
-      DlImage::OwningContext::kRaster);
+  return impeller::DisplayListToTexture(
+      display_list, render_target_size, *context,
+      /*reset_host_buffer=*/false,
+      /*generate_mips=*/false, impeller_pixel_format);
 }
 
-sk_sp<DlImage> DoMakeRasterSnapshot(
-    const sk_sp<DisplayList>& display_list,
+/// The rendering context state a snapshot needs. |pbuffer_surface| and
+/// |context_result| must be kept alive for the duration of the snapshot to
+/// keep the context current.
+struct SnapshotContext {
+  // Destroyed in reverse order: the context result is released before the
+  // offscreen surface it made current.
+  std::unique_ptr<Surface> pbuffer_surface;
+  std::unique_ptr<GLContextResult> context_result;
+  std::shared_ptr<impeller::AiksContext> aiks_context;
+};
+
+/// Makes a rendering context current and selects the single AiksContext a
+/// snapshot must use.
+///
+/// Constructing an AiksContext issues graphics commands, so on backends that
+/// need a current context (OpenGL ES) the AiksContext is only obtained once a
+/// context is current. If no context can be made current, the returned
+/// |aiks_context| is nullptr and the snapshot must fail.
+SnapshotContext MakeSnapshotContextCurrent(
+    const SnapshotController::Delegate& delegate) {
+  SnapshotContext result;
+  if (const std::unique_ptr<Surface>& surface = delegate.GetSurface()) {
+    result.context_result = surface->MakeRenderContextCurrent();
+    if (!result.context_result || !result.context_result->GetResult()) {
+      return result;
+    }
+    result.aiks_context = delegate.GetAiksContext();
+  } else if (const std::unique_ptr<SnapshotSurfaceProducer>& producer =
+                 delegate.GetSnapshotSurfaceProducer()) {
+    // The producer makes its offscreen surface current before it constructs
+    // the surface's AiksContext, so reuse that AiksContext rather than asking
+    // the delegate, which would construct yet another one.
+    result.pbuffer_surface = producer->CreateSnapshotSurface();
+    if (!result.pbuffer_surface) {
+      return result;
+    }
+    result.context_result = result.pbuffer_surface->MakeRenderContextCurrent();
+    if (!result.context_result || !result.context_result->GetResult()) {
+      return result;
+    }
+    result.aiks_context = result.pbuffer_surface->GetAiksContext();
+  } else {
+    // No surface and no way to make one. Backends that get here (Metal,
+    // Vulkan) have no notion of a current context, so constructing an
+    // AiksContext is safe.
+    result.aiks_context = delegate.GetAiksContext();
+  }
+  return result;
+}
+
+std::shared_ptr<impeller::Texture> DoMakeRasterSnapshot(
+    const SnapshotDelegate::SnapshotDisplayListProvider& provider,
     DlISize size,
     const SnapshotController::Delegate& delegate,
     SnapshotPixelFormat pixel_format) {
-  // Ensure that the current thread has a rendering context. This must be done
-  // before calling GetAiksContext because constructing the AiksContext may
-  // invoke graphics APIs.
-  std::unique_ptr<Surface> pbuffer_surface;
-  std::unique_ptr<GLContextResult> context_result;
-  if (delegate.GetSurface()) {
-    context_result = delegate.GetSurface()->MakeRenderContextCurrent();
-  } else if (delegate.GetSnapshotSurfaceProducer()) {
-    pbuffer_surface =
-        delegate.GetSnapshotSurfaceProducer()->CreateSnapshotSurface();
-    if (pbuffer_surface) {
-      context_result = pbuffer_surface->MakeRenderContextCurrent();
-    }
+  SnapshotContext snapshot_context = MakeSnapshotContextCurrent(delegate);
+  const std::shared_ptr<impeller::AiksContext>& aiks_context =
+      snapshot_context.aiks_context;
+  if (!aiks_context) {
+    return nullptr;
   }
-
-  return DoMakeRasterSnapshot(display_list, size, delegate.GetAiksContext(),
-                              pixel_format);
+  // Produce the display list (for example, flatten a layer tree) only now that
+  // a context is current, and with the AiksContext that renders it.
+  sk_sp<DisplayList> display_list = provider(aiks_context.get());
+  if (!display_list) {
+    return nullptr;
+  }
+  return DoMakeRasterSnapshot(display_list, size, aiks_context, pixel_format);
 }
 
-sk_sp<DlImage> DoMakeRasterSnapshot(
+std::shared_ptr<impeller::Texture> DoMakeRasterSnapshot(
     sk_sp<DisplayList> display_list,
     DlISize picture_size,
     const std::shared_ptr<const fml::SyncSwitch>& sync_switch,
     const std::shared_ptr<impeller::AiksContext>& context,
     SnapshotPixelFormat pixel_format) {
-  sk_sp<DlImage> result;
+  std::shared_ptr<impeller::Texture> result;
   sync_switch->Execute(fml::SyncSwitch::Handlers()
                            .SetIfTrue([&] {
                              // Do nothing.
@@ -114,11 +158,27 @@ sk_sp<DlImage> DoMakeRasterSnapshot(
 }
 }  // namespace
 
-void SnapshotControllerImpeller::MakeRasterSnapshot(
+void SnapshotControllerImpeller::MakeSkiaSnapshot(
     sk_sp<DisplayList> display_list,
     DlISize picture_size,
-    std::function<void(const sk_sp<DlImage>&)> callback,
+    std::function<void(const sk_sp<SkImage>&)> callback,
     SnapshotPixelFormat pixel_format) {
+  FML_UNREACHABLE();
+}
+
+sk_sp<SkImage> SnapshotControllerImpeller::MakeSkiaSnapshotSync(
+    sk_sp<DisplayList> display_list,
+    DlISize picture_size,
+    SnapshotPixelFormat pixel_format) {
+  FML_UNREACHABLE();
+}
+
+void SnapshotControllerImpeller::MakeImpellerSnapshot(
+    SnapshotDelegate::SnapshotDisplayListProvider provider,
+    DlISize picture_size,
+    std::function<void(const std::shared_ptr<impeller::Texture>&)> callback,
+    SnapshotPixelFormat pixel_format) {
+  FML_DCHECK(provider);
   std::shared_ptr<const fml::SyncSwitch> sync_switch =
       GetDelegate().GetIsGpuDisabledSyncSwitch();
   sync_switch->Execute(
@@ -126,34 +186,51 @@ void SnapshotControllerImpeller::MakeRasterSnapshot(
           .SetIfTrue([&] {
             std::shared_ptr<impeller::AiksContext> context =
                 GetDelegate().GetAiksContext();
-            if (context) {
-              context->GetContext()->StoreTaskForGPU(
-                  [context, sync_switch, display_list = std::move(display_list),
-                   picture_size, callback, pixel_format] {
-                    callback(DoMakeRasterSnapshot(display_list, picture_size,
-                                                  sync_switch, context,
-                                                  pixel_format));
-                  },
-                  [callback]() { callback(nullptr); });
-            } else {
+            if (!context) {
               callback(nullptr);
+              return;
             }
+            // Only iOS disables the GPU, and Metal has no current context to
+            // make. Produce the display list now so the layer tree (if any)
+            // is not kept alive until the GPU becomes available.
+            sk_sp<DisplayList> display_list = provider(context.get());
+            if (!display_list) {
+              callback(nullptr);
+              return;
+            }
+            context->GetContext()->StoreTaskForGPU(
+                [context, sync_switch, display_list = std::move(display_list),
+                 picture_size, callback, pixel_format] {
+                  callback(DoMakeRasterSnapshot(display_list, picture_size,
+                                                sync_switch, context,
+                                                pixel_format));
+                },
+                [callback]() { callback(nullptr); });
           })
           .SetIfFalse([&] {
-            callback(DoMakeRasterSnapshot(display_list, picture_size,
-                                          GetDelegate(), pixel_format));
+            callback(DoMakeRasterSnapshot(provider, picture_size, GetDelegate(),
+                                          pixel_format));
           }));
 }
 
-sk_sp<DlImage> SnapshotControllerImpeller::MakeRasterSnapshotSync(
-    sk_sp<DisplayList> display_list,
+std::shared_ptr<impeller::Texture>
+SnapshotControllerImpeller::MakeImpellerSnapshotSync(
+    SnapshotDelegate::SnapshotDisplayListProvider provider,
     DlISize picture_size,
     SnapshotPixelFormat pixel_format) {
-  return DoMakeRasterSnapshot(display_list, picture_size, GetDelegate(),
+  FML_DCHECK(provider);
+  return DoMakeRasterSnapshot(provider, picture_size, GetDelegate(),
                               pixel_format);
 }
 
-sk_sp<DlImage> SnapshotControllerImpeller::MakeTextureImage(
+sk_sp<SkImage> SnapshotControllerImpeller::MakeSkiaTextureImage(
+    sk_sp<SkImage> image,
+    SnapshotPixelFormat pixel_format) {
+  return nullptr;
+}
+
+std::shared_ptr<impeller::Texture>
+SnapshotControllerImpeller::MakeImpellerTextureImage(
     sk_sp<SkImage> image,
     SnapshotPixelFormat pixel_format) {
   auto aiks_context = GetDelegate().GetAiksContext();
@@ -218,8 +295,7 @@ sk_sp<DlImage> SnapshotControllerImpeller::MakeTextureImage(
     return nullptr;
   }
 
-  return impeller::DlImageImpeller::Make(texture,
-                                         DlImage::OwningContext::kRaster);
+  return texture;
 }
 
 void SnapshotControllerImpeller::CacheRuntimeStage(

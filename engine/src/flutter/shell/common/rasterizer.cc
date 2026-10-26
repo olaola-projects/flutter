@@ -129,6 +129,8 @@ void Rasterizer::Teardown() {
       }
 #endif  //  !SLIMPELLER
     }
+    context_switch.reset();
+    surface_->ClearRenderContext();
     surface_.reset();
   }
 
@@ -169,16 +171,30 @@ void Rasterizer::DisableThreadMergerIfNeeded() {
 }
 
 void Rasterizer::NotifyLowMemoryWarning() const {
-#if !SLIMPELLER
+  ClearRenderTargetCache();
+}
+
+void Rasterizer::ClearRenderTargetCache() const {
   if (!surface_) {
     FML_DLOG(INFO)
-        << "Rasterizer::NotifyLowMemoryWarning called with no surface.";
+        << "Rasterizer::ClearRenderTargetCache called with no surface.";
     return;
   }
+#if IMPELLER_SUPPORTS_RENDERING
+  if (auto aiks_context = surface_->GetAiksContext()) {
+    auto context_switch = surface_->MakeRenderContextCurrent();
+    if (context_switch->GetResult()) {
+      aiks_context->ClearRenderTargetCache();
+      aiks_context->ClearCachedTextures();
+    }
+    return;
+  }
+#endif  // IMPELLER_SUPPORTS_RENDERING
+#if !SLIMPELLER
   auto context = surface_->GetContext();
   if (!context) {
     FML_DLOG(INFO)
-        << "Rasterizer::NotifyLowMemoryWarning called with no GrContext.";
+        << "Rasterizer::ClearRenderTargetCache called with no GrContext.";
     return;
   }
   auto context_switch = surface_->MakeRenderContextCurrent();
@@ -186,7 +202,7 @@ void Rasterizer::NotifyLowMemoryWarning() const {
     return;
   }
   context->performDeferredCleanup(std::chrono::milliseconds(0));
-#endif  //  !SLIMPELLER
+#endif  // !SLIMPELLER
 }
 
 void Rasterizer::CollectView(int64_t view_id) {
@@ -435,21 +451,37 @@ std::unique_ptr<Rasterizer::GpuImageResult> Rasterizer::MakeSkiaGpuImage(
 #endif  //  !SLIMPELLER
 }
 
-void Rasterizer::MakeRasterSnapshot(
-    sk_sp<DisplayList> display_list,
-    DlISize picture_size,
-    std::function<void(sk_sp<DlImage>)> callback,
-    SnapshotPixelFormat pixel_format) {
-  return snapshot_controller_->MakeRasterSnapshot(display_list, picture_size,
-                                                  callback, pixel_format);
+void Rasterizer::MakeSkiaSnapshot(sk_sp<DisplayList> display_list,
+                                  DlISize picture_size,
+                                  std::function<void(sk_sp<SkImage>)> callback,
+                                  SnapshotPixelFormat pixel_format) {
+  return snapshot_controller_->MakeSkiaSnapshot(
+      display_list, picture_size, std::move(callback), pixel_format);
 }
 
-sk_sp<DlImage> Rasterizer::MakeRasterSnapshotSync(
+sk_sp<SkImage> Rasterizer::MakeSkiaSnapshotSync(
     sk_sp<DisplayList> display_list,
     DlISize picture_size,
     SnapshotPixelFormat pixel_format) {
-  return snapshot_controller_->MakeRasterSnapshotSync(
-      display_list, picture_size, pixel_format);
+  return snapshot_controller_->MakeSkiaSnapshotSync(std::move(display_list),
+                                                    picture_size, pixel_format);
+}
+
+void Rasterizer::MakeImpellerSnapshot(
+    SnapshotDisplayListProvider provider,
+    DlISize picture_size,
+    std::function<void(std::shared_ptr<impeller::Texture>)> callback,
+    SnapshotPixelFormat pixel_format) {
+  return snapshot_controller_->MakeImpellerSnapshot(
+      std::move(provider), picture_size, std::move(callback), pixel_format);
+}
+
+std::shared_ptr<impeller::Texture> Rasterizer::MakeImpellerSnapshotSync(
+    SnapshotDisplayListProvider provider,
+    DlISize picture_size,
+    SnapshotPixelFormat pixel_format) {
+  return snapshot_controller_->MakeImpellerSnapshotSync(
+      std::move(provider), picture_size, pixel_format);
 }
 
 sk_sp<SkImage> Rasterizer::ConvertToRasterImage(sk_sp<SkImage> image) {
@@ -457,10 +489,18 @@ sk_sp<SkImage> Rasterizer::ConvertToRasterImage(sk_sp<SkImage> image) {
   return snapshot_controller_->ConvertToRasterImage(image);
 }
 
-sk_sp<DlImage> Rasterizer::MakeTextureImage(sk_sp<SkImage> image,
-                                            SnapshotPixelFormat pixel_format) {
+sk_sp<SkImage> Rasterizer::MakeSkiaTextureImage(
+    sk_sp<SkImage> image,
+    SnapshotPixelFormat pixel_format) {
   TRACE_EVENT0("flutter", __FUNCTION__);
-  return snapshot_controller_->MakeTextureImage(image, pixel_format);
+  return snapshot_controller_->MakeSkiaTextureImage(image, pixel_format);
+}
+
+std::shared_ptr<impeller::Texture> Rasterizer::MakeImpellerTextureImage(
+    sk_sp<SkImage> image,
+    SnapshotPixelFormat pixel_format) {
+  TRACE_EVENT0("flutter", __FUNCTION__);
+  return snapshot_controller_->MakeImpellerTextureImage(image, pixel_format);
 }
 
 // |SnapshotDelegate|
@@ -912,6 +952,23 @@ Rasterizer::ScreenshotFormat ToScreenshotFormat(impeller::PixelFormat format) {
     case impeller::PixelFormat::kB10G10R10XR:
     case impeller::PixelFormat::kB10G10R10A10XR:
     case impeller::PixelFormat::kR32Float:
+    case impeller::PixelFormat::kBC1RGBAUNormInt:
+    case impeller::PixelFormat::kBC1RGBAUNormIntSRGB:
+    case impeller::PixelFormat::kBC3RGBAUNormInt:
+    case impeller::PixelFormat::kBC3RGBAUNormIntSRGB:
+    case impeller::PixelFormat::kBC5RGUNormInt:
+    case impeller::PixelFormat::kBC7RGBAUNormInt:
+    case impeller::PixelFormat::kBC7RGBAUNormIntSRGB:
+    case impeller::PixelFormat::kETC2RGB8UNormInt:
+    case impeller::PixelFormat::kETC2RGB8UNormIntSRGB:
+    case impeller::PixelFormat::kETC2RGBA8UNormInt:
+    case impeller::PixelFormat::kETC2RGBA8UNormIntSRGB:
+    case impeller::PixelFormat::kASTC4x4LDR:
+    case impeller::PixelFormat::kASTC4x4LDRSRGB:
+    case impeller::PixelFormat::kASTC8x8LDR:
+    case impeller::PixelFormat::kASTC8x8LDRSRGB:
+    case impeller::PixelFormat::kASTC4x4HDR:
+    case impeller::PixelFormat::kASTC8x8HDR:
       FML_DCHECK(false);
       return Rasterizer::ScreenshotFormat::kUnknown;
     case impeller::PixelFormat::kR8G8B8A8UNormInt:

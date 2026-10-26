@@ -39,11 +39,11 @@ enum FlutterDarwinPlatform {
     required this.binaryName,
     required this.targetPlatform,
     required this.swiftPackagePlatform,
-    required String artifactName,
+    required this._artifactName,
     required this.artifactZip,
     required this.xcframeworkArtifact,
     required this.sdks,
-  }) : _artifactName = artifactName;
+  });
 
   /// The name of the binary file within the [xcframeworkArtifact].
   final String binaryName;
@@ -76,8 +76,8 @@ enum FlutterDarwinPlatform {
   /// Minimum supported version for the platform.
   Version deploymentTarget() {
     return switch (this) {
-      ios => Version(13, 0, null),
-      macos => Version(10, 15, null),
+      ios => Version(15, 0, null),
+      macos => Version(12, 0, null),
     };
   }
 
@@ -136,7 +136,7 @@ enum FlutterDarwinPlatform {
   }
 
   /// Returns the corresponding build directory for the platform.
-  String buildDirectory({Config? config, FileSystem? fileSystem}) {
+  String buildDirectory({required Config config, required FileSystem fileSystem}) {
     switch (this) {
       case FlutterDarwinPlatform.ios:
         return getIosBuildDirectory(config: config, fileSystem: fileSystem);

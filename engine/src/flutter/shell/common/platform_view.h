@@ -21,8 +21,9 @@
 #include "flutter/lib/ui/window/platform_message.h"
 #include "flutter/lib/ui/window/pointer_data_packet.h"
 #include "flutter/lib/ui/window/viewport_metrics.h"
+#include "flutter/runtime/runtime_controller.h"
+#include "flutter/shell/common/animator.h"
 #include "flutter/shell/common/platform_message_handler.h"
-#include "flutter/shell/common/pointer_data_dispatcher.h"
 #include "flutter/shell/common/vsync_waiter.h"
 #include "third_party/skia/include/gpu/ganesh/GrDirectContext.h"
 
@@ -181,6 +182,23 @@ class PlatformView {
     ///
     virtual void OnPlatformViewDispatchPointerDataPacket(
         std::unique_ptr<PointerDataPacket> packet) = 0;
+
+    //--------------------------------------------------------------------------
+    /// @brief      Requests the delegate to perform framework hit test from the
+    ///             engine.
+    ///             This API must be called from the UI thread.
+    ///             Calling this from the platform thread causes
+    ///             undefined behavior if the UI and platform threads
+    ///             are not merged.
+    /// @param[in]  view_id The identifier of the flutter view that
+    ///                     should be hit tested.
+    /// @param[in]  offset  The position in the view that should be hit tested.
+    ///
+    /// @return     The hit test response.
+    ///
+    virtual HitTestResponse OnPlatformViewHitTest(
+        int64_t view_id,
+        const flutter::PointData offset) = 0;
 
     //--------------------------------------------------------------------------
     /// @brief      Notifies the delegate that the platform view has encountered
@@ -369,6 +387,16 @@ class PlatformView {
     /// @return     The settings.
     ///
     virtual const Settings& OnPlatformViewGetSettings() const = 0;
+
+    //--------------------------------------------------------------------------
+    /// @brief      Returns a task runner that executes tasks on the IO thread
+    ///             and stops running tasks after the shell shuts down the IO
+    ///             thread.
+    ///
+    /// @return     The task runner.
+    ///
+    virtual std::shared_ptr<fml::BasicTaskRunner>
+    OnPlatformViewGetShutdownSafeIOTaskRunner() const = 0;
   };
 
   //----------------------------------------------------------------------------
@@ -676,12 +704,6 @@ class PlatformView {
   ///
   virtual void ReleaseResourceContext() const;
 
-  //--------------------------------------------------------------------------
-  /// @brief      Returns a platform-specific PointerDataDispatcherMaker so the
-  ///             `Engine` can construct the PointerDataPacketDispatcher based
-  ///             on platforms.
-  virtual PointerDataDispatcherMaker GetDispatcherMaker();
-
   //----------------------------------------------------------------------------
   /// @brief      Returns a weak pointer to the platform view. Since the
   ///             platform view may only be created, accessed and destroyed
@@ -736,6 +758,17 @@ class PlatformView {
   /// @param[in]  packet  The pointer data packet to dispatch to the framework.
   ///
   void DispatchPointerDataPacket(std::unique_ptr<PointerDataPacket> packet);
+
+  //----------------------------------------------------------------------------
+  /// @brief      Requests to perform framework hit test from the engine.
+  ///
+  /// @param[in]  view_id The identifier of the flutter view that
+  ///                     should be hit tested.
+  /// @param[in]  offset  The position in the view that should be hit tested.
+  ///
+  /// @return     The hit test response.
+  ///
+  HitTestResponse HitTest(int64_t view_id, const flutter::PointData offset);
 
   //--------------------------------------------------------------------------
   /// @brief      Used by the embedder to specify a texture that it wants the

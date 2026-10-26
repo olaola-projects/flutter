@@ -8,6 +8,7 @@
 #include "flutter/lib/ui/painting/image_encoding_impl.h"
 
 #include "flutter/common/task_runners.h"
+#include "flutter/display_list/image/dl_image_skia.h"
 #include "flutter/fml/synchronization/waitable_event.h"
 #include "flutter/lib/ui/painting/image.h"
 #include "flutter/lib/ui/painting/testing/mocks.h"
@@ -37,12 +38,12 @@ fml::AutoResetWaitableEvent message_latch;
 class MockSyncSwitch {
  public:
   struct Handlers {
-    Handlers& SetIfTrue(const std::function<void()>& handler) {
-      true_handler = handler;
+    Handlers& SetIfTrue(std::function<void()> handler) {
+      true_handler = std::move(handler);
       return *this;
     }
-    Handlers& SetIfFalse(const std::function<void()>& handler) {
-      false_handler = handler;
+    Handlers& SetIfFalse(std::function<void()> handler) {
+      false_handler = std::move(handler);
       return *this;
     }
     std::function<void()> true_handler = [] {};
@@ -150,9 +151,13 @@ TEST_F(ShellTest, EncodeImageAccessesSyncSwitch) {
           .WillOnce([](const MockSyncSwitch::Handlers& handlers) {
             handlers.true_handler();
           });
-      ConvertToRasterUsingResourceContext(canvas_image->image()->skia_image(),
-                                          io_manager->GetResourceContext(),
-                                          is_gpu_disabled_sync_switch);
+      auto skia_image = canvas_image->image()
+                            ? canvas_image->image()->asSkiaImage()
+                            : nullptr;
+      ConvertToRasterUsingResourceContext(
+          skia_image ? skia_image->skia_image() : nullptr,
+          io_manager->GetResourceContext(), is_gpu_disabled_sync_switch);
+
       latch.Signal();
     });
 
@@ -209,10 +214,10 @@ std::shared_ptr<impeller::Context> MakeConvertDlImageToSkImageContext(
   EXPECT_CALL(*context, GetResourceAllocator).WillRepeatedly(Return(allocator));
   EXPECT_CALL(*context, CreateCommandBuffer).WillOnce(Return(command_buffer));
   EXPECT_CALL(*device_buffer, OnGetContents).WillOnce(Return(buffer.data()));
-  EXPECT_CALL(*command_queue, Submit(_, _, _))
+  EXPECT_CALL(*command_queue, Submit(_, _))
       .WillRepeatedly(
           DoAll(InvokeArgument<1>(impeller::CommandBuffer::Status::kCompleted),
-                Return(fml::Status())));
+                Return(absl::OkStatus())));
   EXPECT_CALL(*context, GetCommandQueue).WillRepeatedly(Return(command_queue));
   return context;
 }
@@ -485,10 +490,14 @@ TEST(ImageEncodingImpellerTest, ConvertDlImageToSkImage16Float) {
   sk_sp<MockDlImage> image(new MockDlImage());
   EXPECT_CALL(*image, GetSize)  //
       .WillRepeatedly(Return(DlISize(100, 100)));
+
   impeller::TextureDescriptor desc;
   desc.format = impeller::PixelFormat::kR16G16B16A16Float;
   auto texture = std::make_shared<MockTexture>(desc);
-  EXPECT_CALL(*image, impeller_texture).WillOnce(Return(texture));
+  EXPECT_CALL(*texture, GetSize)
+      .WillRepeatedly(Return(impeller::ISize(100, 100)));
+  EXPECT_CALL(*image, GetImpellerTexture(::testing::_))
+      .WillOnce(Return(texture));
   std::vector<uint8_t> buffer;
   buffer.reserve(100 * 100 * 8);
   auto context = MakeConvertDlImageToSkImageContext(buffer);
@@ -498,7 +507,7 @@ TEST(ImageEncodingImpellerTest, ConvertDlImageToSkImage16Float) {
       .WillRepeatedly(Return(true));
   ImageEncodingImpeller::ConvertDlImageToSkImage(
       image,
-      [&did_call](const fml::StatusOr<sk_sp<SkImage>>& image) {
+      [&did_call](const absl::StatusOr<sk_sp<SkImage>>& image) {
         did_call = true;
         ASSERT_TRUE(image.ok());
         ASSERT_TRUE(image.value());
@@ -515,10 +524,14 @@ TEST(ImageEncodingImpellerTest, ConvertDlImageToSkImage10XR) {
   sk_sp<MockDlImage> image(new MockDlImage());
   EXPECT_CALL(*image, GetSize)  //
       .WillRepeatedly(Return(DlISize(100, 100)));
+
   impeller::TextureDescriptor desc;
   desc.format = impeller::PixelFormat::kB10G10R10XR;
   auto texture = std::make_shared<MockTexture>(desc);
-  EXPECT_CALL(*image, impeller_texture).WillOnce(Return(texture));
+  EXPECT_CALL(*texture, GetSize)
+      .WillRepeatedly(Return(impeller::ISize(100, 100)));
+  EXPECT_CALL(*image, GetImpellerTexture(::testing::_))
+      .WillOnce(Return(texture));
   std::vector<uint8_t> buffer;
   buffer.reserve(100 * 100 * 4);
   auto context = MakeConvertDlImageToSkImageContext(buffer);
@@ -528,7 +541,7 @@ TEST(ImageEncodingImpellerTest, ConvertDlImageToSkImage10XR) {
       .WillRepeatedly(Return(true));
   ImageEncodingImpeller::ConvertDlImageToSkImage(
       image,
-      [&did_call](const fml::StatusOr<sk_sp<SkImage>>& image) {
+      [&did_call](const absl::StatusOr<sk_sp<SkImage>>& image) {
         did_call = true;
         ASSERT_TRUE(image.ok());
         ASSERT_TRUE(image.value());
@@ -536,6 +549,44 @@ TEST(ImageEncodingImpellerTest, ConvertDlImageToSkImage10XR) {
         EXPECT_EQ(100, image.value()->height());
         EXPECT_EQ(kBGR_101010x_XR_SkColorType, image.value()->colorType());
         EXPECT_EQ(nullptr, image.value()->colorSpace());
+      },
+      snapshot_delegate.GetWeakPtr(), context);
+  EXPECT_TRUE(did_call);
+}
+
+TEST(ImageEncodingImpellerTest, ConvertDlImageToSkImageTextureSizeMismatch) {
+  DlISize dl_image_size(100, 100);
+  sk_sp<MockDlImage> image(new MockDlImage());
+  EXPECT_CALL(*image, GetSize)  //
+      .WillRepeatedly(Return(dl_image_size));
+
+  // Create a texture that is smaller than the DlImage.
+  impeller::TextureDescriptor desc;
+  desc.format = impeller::PixelFormat::kR8G8B8A8UNormInt;
+  desc.size = impeller::ISize(50, 50);
+  auto texture = std::make_shared<MockTexture>(desc);
+  EXPECT_CALL(*texture, GetSize).WillRepeatedly(Return(desc.size));
+  EXPECT_CALL(*image, GetImpellerTexture(::testing::_))
+      .WillOnce(Return(texture));
+  std::vector<uint8_t> buffer;
+  buffer.reserve(desc.size.width * desc.size.height *
+                 impeller::BytesPerPixelForPixelFormat(desc.format));
+  auto context = MakeConvertDlImageToSkImageContext(buffer);
+
+  bool did_call = false;
+  MockSnapshotDelegate snapshot_delegate;
+  EXPECT_CALL(snapshot_delegate, MakeRenderContextCurrent)
+      .WillRepeatedly(Return(true));
+  ImageEncodingImpeller::ConvertDlImageToSkImage(
+      image,
+      [&](const absl::StatusOr<sk_sp<SkImage>>& result) {
+        did_call = true;
+        ASSERT_TRUE(result.ok());
+        ASSERT_TRUE(result.value());
+        // The SkImage size should match the size of the actual texture, not
+        // the size of the DlImage.
+        EXPECT_EQ(desc.size.width, result.value()->width());
+        EXPECT_EQ(desc.size.height, result.value()->height());
       },
       snapshot_delegate.GetWeakPtr(), context);
   EXPECT_TRUE(did_call);
@@ -559,7 +610,7 @@ TEST(ImageEncodingImpellerTest, PngEncoding10XR) {
 
   sk_sp<SkImage> image = surface->makeImageSnapshot();
 
-  fml::StatusOr<sk_sp<SkData>> png = EncodeImage(image, ImageByteFormat::kPNG);
+  absl::StatusOr<sk_sp<SkData>> png = EncodeImage(image, ImageByteFormat::kPNG);
   EXPECT_TRUE(png.ok());
 }
 
@@ -583,25 +634,25 @@ void PngMemoryRead(png_structp png_ptr,
   memory_reader->offset += byte_count_to_read;
 }
 
-fml::StatusOr<std::vector<uint32_t>> ReadPngFromMemory(const uint8_t* png_data,
-                                                       size_t png_size) {
+absl::StatusOr<std::vector<uint32_t>> ReadPngFromMemory(const uint8_t* png_data,
+                                                        size_t png_size) {
   png_structp png =
       png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
   if (!png) {
-    return fml::Status(fml::StatusCode::kAborted, "unknown");
+    return absl::Status(absl::StatusCode::kAborted, "unknown");
   }
 
   png_infop info = png_create_info_struct(png);
   if (!info) {
     png_destroy_read_struct(&png, nullptr, nullptr);
-    return fml::Status(fml::StatusCode::kAborted, "unknown");
+    return absl::Status(absl::StatusCode::kAborted, "unknown");
   }
 
   fml::ScopedCleanupClosure png_cleanup(
       [&png, &info]() { png_destroy_read_struct(&png, &info, nullptr); });
 
   if (setjmp(png_jmpbuf(png))) {
-    return fml::Status(fml::StatusCode::kAborted, "unknown");
+    return absl::Status(absl::StatusCode::kAborted, "unknown");
   }
 
   PngMemoryReader memory_reader = {
@@ -656,9 +707,9 @@ TEST(ImageEncodingImpellerTest, PngEncodingBGRA10XR) {
 
   sk_sp<SkImage> image = surface->makeImageSnapshot();
 
-  fml::StatusOr<sk_sp<SkData>> png = EncodeImage(image, ImageByteFormat::kPNG);
+  absl::StatusOr<sk_sp<SkData>> png = EncodeImage(image, ImageByteFormat::kPNG);
   ASSERT_TRUE(png.ok());
-  fml::StatusOr<std::vector<uint32_t>> pixels =
+  absl::StatusOr<std::vector<uint32_t>> pixels =
       ReadPngFromMemory(png.value()->bytes(), png.value()->size());
   ASSERT_TRUE(pixels.ok());
   EXPECT_EQ(pixels.value()[0], 0xff0000ff);

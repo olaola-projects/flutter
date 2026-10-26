@@ -21,6 +21,7 @@ import 'package:flutter_tools/src/device.dart';
 import 'package:flutter_tools/src/device_port_forwarder.dart';
 import 'package:flutter_tools/src/ios/application_package.dart';
 import 'package:flutter_tools/src/ios/core_devices.dart';
+import 'package:flutter_tools/src/ios/device_support.dart';
 import 'package:flutter_tools/src/ios/devices.dart';
 import 'package:flutter_tools/src/ios/ios_deploy.dart';
 import 'package:flutter_tools/src/ios/iproxy.dart';
@@ -39,18 +40,6 @@ import '../../src/fake_process_manager.dart';
 import '../../src/fakes.dart';
 import '../../src/package_config.dart';
 import '../../src/throwing_pub.dart';
-
-// Helper to generate xattr commands for removing specific extended attributes
-List<FakeCommand> xattrCommands(FlutterProject flutterProject) {
-  return <FakeCommand>[
-    FakeCommand(
-      command: <String>['xattr', '-r', '-d', 'com.apple.FinderInfo', flutterProject.directory.path],
-    ),
-    FakeCommand(
-      command: <String>['xattr', '-r', '-d', 'com.apple.provenance', flutterProject.directory.path],
-    ),
-  ];
-}
 
 FakeCommand xattrCreatedByBuildSystemCommand(String outputDirPath) {
   return FakeCommand(
@@ -148,9 +137,9 @@ void main() {
           flutterProject.ios,
           'flutter',
           'My Super Awesome App',
+          toolContext: FakeToolContext(fs: fileSystem),
         );
 
-        processManager.addCommands(xattrCommands(flutterProject));
         processManager.addCommand(const FakeCommand(command: kRunReleaseArgs));
 
         final LaunchResult launchResult = await iosDevice.startApp(
@@ -211,6 +200,7 @@ void main() {
           flutterProject.ios,
           'flutter',
           'My Super Awesome App',
+          toolContext: FakeToolContext(fs: fileSystem),
         );
 
         final LaunchResult launchResult = await iosDevice.startApp(
@@ -252,12 +242,12 @@ void main() {
           flutterProject.ios,
           'flutter',
           'My Super Awesome App',
+          toolContext: FakeToolContext(fs: fileSystem),
         );
         fileSystem
             .directory('build/ios/Release-iphoneos/My Super Awesome App.app')
             .createSync(recursive: true);
 
-        processManager.addCommands(xattrCommands(flutterProject));
         processManager.addCommand(const FakeCommand(command: kRunReleaseArgs));
         processManager.addCommand(xattrCreatedByBuildSystemCommand('build/ios/Release-iphoneos'));
         processManager.addCommand(
@@ -331,6 +321,7 @@ void main() {
           logger: logger,
           artifacts: artifacts,
           analytics: fakeExactAnalytics,
+          os: FakeOperatingSystemUtils(hostPlatform: HostPlatform.darwin_x64),
         );
         setUpIOSProject(fileSystem);
         final FlutterProject flutterProject = FlutterProject.fromDirectory(
@@ -340,12 +331,12 @@ void main() {
           flutterProject.ios,
           'flutter',
           'My Super Awesome App',
+          toolContext: FakeToolContext(fs: fileSystem),
         );
         fileSystem
             .directory('build/ios/Release-iphoneos/My Super Awesome App.app')
             .createSync(recursive: true);
 
-        processManager.addCommands(xattrCommands(flutterProject));
         processManager.addCommand(
           const FakeCommand(
             command: <String>[
@@ -463,7 +454,8 @@ void main() {
             fileSystem: fileSystem,
             processManager: processManager,
             logger: logger,
-            artifacts: artifacts,
+            artifacts: fakeArtifacts,
+            os: FakeOperatingSystemUtils(hostPlatform: HostPlatform.darwin_x64),
           );
           setUpIOSProject(fileSystem);
           final FlutterProject flutterProject = FlutterProject.fromDirectory(
@@ -473,6 +465,7 @@ void main() {
             flutterProject.ios,
             'flutter',
             'My Super Awesome App',
+            toolContext: FakeToolContext(fs: fileSystem),
           );
           fileSystem
               .directory('build/ios/Release-iphoneos/My Super Awesome App.app')
@@ -483,7 +476,6 @@ void main() {
               .childFile('FlutterPlugin.h')
               .createSync(recursive: true);
           processManager.addCommands([
-            ...xattrCommands(flutterProject),
             FakeCommand(
               command: const <String>[
                 'xcrun',
@@ -570,7 +562,8 @@ void main() {
             fileSystem: fileSystem,
             processManager: processManager,
             logger: logger,
-            artifacts: artifacts,
+            artifacts: fakeArtifacts,
+            os: FakeOperatingSystemUtils(hostPlatform: HostPlatform.darwin_x64),
           );
           setUpIOSProject(fileSystem);
           final FlutterProject flutterProject = FlutterProject.fromDirectory(
@@ -580,6 +573,7 @@ void main() {
             flutterProject.ios,
             'flutter',
             'My Super Awesome App',
+            toolContext: FakeToolContext(fs: fileSystem),
           );
 
           fileSystem.directory('build/ios/iphoneos').deleteSync(recursive: true);
@@ -589,7 +583,6 @@ void main() {
               .childFile('FlutterPlugin.h')
               .createSync(recursive: true);
           processManager.addCommands([
-            ...xattrCommands(flutterProject),
             const FakeCommand(
               command: <String>[
                 'xcrun',
@@ -663,9 +656,9 @@ void main() {
           flutterProject.ios,
           'flutter',
           'My Super Awesome App',
+          toolContext: FakeToolContext(fs: fileSystem),
         );
 
-        processManager.addCommands(xattrCommands(flutterProject));
         // The first xcrun call should fail with a
         // concurrent build exception.
         processManager.addCommand(
@@ -791,6 +784,7 @@ void main() {
             flutterProject.ios,
             'flutter',
             'My Super Awesome App',
+            toolContext: FakeToolContext(fs: fileSystem),
           );
           fileSystem
               .directory('build/ios/Release-iphoneos/My Super Awesome App.app')
@@ -848,6 +842,7 @@ void main() {
             flutterProject.ios,
             'flutter',
             'My Super Awesome App',
+            toolContext: FakeToolContext(fs: fileSystem),
           );
           fileSystem
               .directory('build/ios/Release-iphoneos/My Super Awesome App.app')
@@ -902,6 +897,7 @@ void main() {
             flutterProject.ios,
             'flutter',
             'My Super Awesome App',
+            toolContext: FakeToolContext(fs: fileSystem),
           );
           fileSystem
               .directory('build/ios/Release-iphoneos/My Super Awesome App.app')
@@ -952,6 +948,7 @@ void main() {
             flutterProject.ios,
             'flutter',
             'My Super Awesome App',
+            toolContext: FakeToolContext(fs: fileSystem),
           );
           fileSystem
               .directory('build/ios/Release-iphoneos/My Super Awesome App.app')
@@ -1021,6 +1018,7 @@ void main() {
             flutterProject.ios,
             'flutter',
             'My Super Awesome App',
+            toolContext: FakeToolContext(fs: fileSystem),
           );
           fileSystem
               .directory('build/ios/Release-iphoneos/My Super Awesome App.app')
@@ -1056,6 +1054,86 @@ void main() {
           expect(fileSystem.directory('build/ios/iphoneos'), exists);
           expect(launchResult.started, true);
           expect(processManager, hasNoRemainingExpectations);
+        },
+        overrides: <Type, Generator>{
+          ProcessManager: () => FakeProcessManager.any(),
+          Pub: () => const ThrowingPub(),
+          FileSystem: () => fileSystem,
+          Logger: () => logger,
+          OperatingSystemUtils: () => os,
+          Platform: () => macPlatform,
+          XcodeProjectInterpreter: () => fakeXcodeProjectInterpreter,
+          Xcode: () => xcode,
+          Artifacts: () => artifacts,
+        },
+      );
+
+      testUsingContext(
+        'logs warning when missing symbols pattern is detected in log reader',
+        () async {
+          final IOSDevice iosDevice = setUpIOSDevice(
+            fileSystem: fileSystem,
+            processManager: FakeProcessManager.any(),
+            logger: logger,
+            artifacts: artifacts,
+            isCoreDevice: true,
+            coreDeviceControl: FakeIOSCoreDeviceControl(),
+            xcodeDebug: FakeXcodeDebug(
+              expectedProject: XcodeDebugProject(
+                scheme: 'Runner',
+                xcodeWorkspace: fileSystem.directory('/ios/Runner.xcworkspace'),
+                xcodeProject: fileSystem.directory('/ios/Runner.xcodeproj'),
+                hostAppProjectName: 'Runner',
+              ),
+              expectedDeviceId: '123',
+              expectedLaunchArguments: <String>['--enable-dart-profiling'],
+            ),
+          );
+
+          setUpIOSProject(fileSystem);
+          final FlutterProject flutterProject = FlutterProject.fromDirectory(
+            fileSystem.currentDirectory,
+          );
+          final buildableIOSApp = BuildableIOSApp(
+            flutterProject.ios,
+            'flutter',
+            'My Super Awesome App',
+            toolContext: FakeToolContext(fs: fileSystem),
+          );
+          fileSystem
+              .directory('build/ios/Release-iphoneos/My Super Awesome App.app')
+              .createSync(recursive: true);
+
+          final deviceLogReader = FakeSharedIOSDeviceLogReader();
+
+          iosDevice.portForwarder = const NoOpDevicePortForwarder();
+          iosDevice.setLogReader(buildableIOSApp, deviceLogReader);
+
+          Timer.run(() {
+            deviceLogReader.addLine('The Dart VM service is listening on http://127.0.0.1:456');
+            deviceLogReader.addLine('warning: libobjc.A.dylib is being read from process memory.');
+          });
+
+          final LaunchResult launchResult = await iosDevice.startApp(
+            buildableIOSApp,
+            debuggingOptions: DebuggingOptions.enabled(
+              const BuildInfo(
+                BuildMode.debug,
+                null,
+                buildName: '1.2.3',
+                buildNumber: '4',
+                treeShakeIcons: false,
+                packageConfigPath: '.dart_tool/package_config.json',
+              ),
+            ),
+            platformArgs: <String, Object>{},
+          );
+
+          expect(launchResult.started, true);
+          expect(
+            logger.warningText,
+            contains('Xcode Device Support was not found for this device.'),
+          );
         },
         overrides: <Type, Generator>{
           ProcessManager: () => FakeProcessManager.any(),
@@ -1121,6 +1199,7 @@ void main() {
               flutterProject.ios,
               'flutter',
               'My Super Awesome App',
+              toolContext: FakeToolContext(fs: fileSystem),
             );
             fileSystem
                 .directory('build/ios/Release-iphoneos/My Super Awesome App.app')
@@ -1206,6 +1285,7 @@ void main() {
             flutterProject.ios,
             'flutter',
             'My Super Awesome App',
+            toolContext: FakeToolContext(fs: fileSystem),
           );
           fileSystem
               .directory('build/ios/Release-iphoneos/My Super Awesome App.app')
@@ -1286,6 +1366,7 @@ void main() {
             flutterProject.ios,
             'flutter',
             'My Super Awesome App',
+            toolContext: FakeToolContext(fs: fileSystem),
           );
           fileSystem
               .directory('build/ios/Release-iphoneos/My Super Awesome App.app')
@@ -1341,6 +1422,7 @@ void main() {
             flutterProject.ios,
             'flutter',
             'My Super Awesome App',
+            toolContext: FakeToolContext(fs: fileSystem),
           );
           fileSystem
               .directory('build/ios/Release-iphoneos/My Super Awesome App.app')
@@ -1397,6 +1479,7 @@ void main() {
             flutterProject.ios,
             'flutter',
             'My Super Awesome App',
+            toolContext: FakeToolContext(fs: fileSystem),
           );
           fileSystem
               .directory('build/ios/Release-iphoneos/My Super Awesome App.app')
@@ -1483,8 +1566,9 @@ IOSDevice setUpIOSDevice({
   IOSCoreDeviceControl? coreDeviceControl,
   IOSCoreDeviceLauncher? coreDeviceLauncher,
   FakeXcodeDebug? xcodeDebug,
-  DarwinArch cpuArchitecture = DarwinArch.arm64,
+  CpuArch cpuArchitecture = CpuArch.arm64,
   FakeExactAnalytics? analytics,
+  OperatingSystemUtils? os,
 }) {
   artifacts ??= Artifacts.test();
   final cache = Cache.test(
@@ -1493,14 +1577,30 @@ IOSDevice setUpIOSDevice({
   );
 
   logger ??= BufferLogger.test();
+  final FileSystem testFileSystem = fileSystem ?? MemoryFileSystem.test();
   return IOSDevice(
     '123',
     name: 'iPhone 1',
     sdkVersion: sdkVersion,
-    fileSystem: fileSystem ?? MemoryFileSystem.test(),
+    fileSystem: testFileSystem,
+    fileSystemUtils: FileSystemUtils(fileSystem: testFileSystem, platform: macPlatform),
     platform: macPlatform,
+    processUtils: ProcessUtils(
+      processManager: processManager ?? FakeProcessManager.any(),
+      logger: logger,
+    ),
+    xcode: null,
     iProxy: IProxy.test(logger: logger, processManager: processManager ?? FakeProcessManager.any()),
     logger: logger,
+    toolContext: FakeToolContext(
+      artifacts: artifacts,
+      cache: cache,
+      fs: testFileSystem,
+      logger: logger,
+      os: os ?? FakeOperatingSystemUtils(hostPlatform: HostPlatform.darwin_arm64),
+      platform: macPlatform,
+      processManager: processManager ?? FakeProcessManager.any(),
+    ),
     iosDeploy: IOSDeploy(
       logger: logger,
       platform: macPlatform,
@@ -1518,7 +1618,7 @@ IOSDevice setUpIOSDevice({
     coreDeviceControl: coreDeviceControl ?? FakeIOSCoreDeviceControl(),
     coreDeviceLauncher: coreDeviceLauncher ?? FakeIOSCoreDeviceLauncher(),
     xcodeDebug: xcodeDebug ?? FakeXcodeDebug(),
-    cpuArchitecture: cpuArchitecture,
+    cpuArch: cpuArchitecture,
     connectionInterface: DeviceConnectionInterface.attached,
     isConnected: true,
     isPaired: true,
@@ -1557,7 +1657,7 @@ class FakeXcodeProjectInterpreter extends Fake implements XcodeProjectInterprete
   Future<List<String>> fetchDependenciesAndGenerateXcodebuildArgs(
     XcodeBasedProject xcodeProject,
     Directory buildDirectory, {
-    bool skipPackageUpdatesAndValidation = true,
+    bool skipPackageValidation = true,
   }) async {
     return <String>['xcrun', 'xcodebuild'];
   }
@@ -1575,6 +1675,11 @@ class FakeXcodeProjectInterpreter extends Fake implements XcodeProjectInterprete
     required XcodeProjectBuildContext buildContext,
     Duration timeout = const Duration(minutes: 1),
   }) async => buildSettings;
+
+  @override
+  String swiftPackageCachePath(Directory buildDirectory) {
+    return '';
+  }
 }
 
 class FakeXcodeDebug extends Fake implements XcodeDebug {
@@ -1744,6 +1849,19 @@ class FakeIOSCoreDeviceLauncher extends Fake implements IOSCoreDeviceLauncher {
   @override
   Future<bool> launchAppWithLLDBDebugger({
     required String deviceId,
+    required IOSDeviceSupport deviceSupport,
+    required String bundlePath,
+    required String bundleId,
+    required List<String> launchArguments,
+    required BuildMode mode,
+    required ShutdownHooks shutdownHooks,
+  }) async {
+    return true;
+  }
+
+  @override
+  Future<bool> launchAppAndStreamLogsWithoutDebugger({
+    required String deviceId,
     required String bundlePath,
     required String bundleId,
     required List<String> launchArguments,
@@ -1778,5 +1896,49 @@ class FakeArtifacts extends Fake implements Artifacts {
   }
 
   @override
+  FileSystemEntity getHostArtifact(HostArtifact artifact) {
+    return Artifacts.test().getHostArtifact(artifact);
+  }
+
+  @override
   LocalEngineInfo? get localEngineInfo => null;
+}
+
+class FakeSharedIOSDeviceLogReader extends SharedIOSDeviceLogReader {
+  @override
+  String get name => 'FakeLogReader';
+
+  bool disposed = false;
+
+  final _lineQueue = <String>[];
+  late final _linesController = StreamController<String>.broadcast(onListen: _onListen);
+
+  @override
+  Stream<String> get logLines => _linesController.stream;
+
+  @override
+  StreamController<String> get linesController => _linesController;
+
+  void _onListen() {
+    _lineQueue.forEach(addLogToStream);
+    _lineQueue.clear();
+  }
+
+  void addLine(String line) {
+    if (_linesController.hasListener) {
+      addLogToStream(line);
+    } else {
+      _lineQueue.add(line);
+    }
+  }
+
+  @override
+  Future<void> dispose() async {
+    _lineQueue.clear();
+    await _linesController.close();
+    disposed = true;
+  }
+
+  @override
+  Future<void> provideVmService(Object? connectedVmService) async {}
 }

@@ -20,6 +20,7 @@
 #include "impeller/entity/contents/clip_contents.h"
 #include "impeller/entity/contents/solid_rrect_like_blur_contents.h"
 #include "impeller/entity/contents/text_contents.h"
+#include "impeller/entity/contents/uber_sdf_parameters.h"
 #include "impeller/entity/entity.h"
 #include "impeller/entity/entity_pass_clip_stack.h"
 #include "impeller/entity/geometry/geometry.h"
@@ -45,6 +46,9 @@ struct BackdropData {
   // multiple backdrops that share an identical filter.
   std::optional<Snapshot> shared_filter_snapshot;
   std::shared_ptr<flutter::DlImageFilter> last_backdrop;
+  // The union of the coverage bounding boxes for all backdrop filters
+  // that share this backdrop_id.
+  Rect coverage_union;
 };
 
 struct CanvasStackEntry {
@@ -117,12 +121,9 @@ class LazyRenderingConfig {
 
 class Canvas {
  public:
-  static constexpr uint32_t kMaxDepth = 1 << 24;
-
-  using BackdropFilterProc = std::function<std::shared_ptr<FilterContents>(
-      FilterInput::Ref,
-      const Matrix& effect_transform,
-      Entity::RenderingMode rendering_mode)>;
+  /// Maximum discrete integer depth level within the 18-bit depth precision
+  /// limit defined by `Entity::kDepthEpsilon`.
+  static constexpr uint32_t kMaxDepth = (1 << 18) - 1;
 
   Canvas(ContentContext& renderer,
          const RenderTarget& render_target,
@@ -147,6 +148,10 @@ class Canvas {
   ///        within the same layer
   void SetBackdropData(std::unordered_map<int64_t, BackdropData> backdrop_data,
                        size_t backdrop_count);
+
+  const std::unordered_map<int64_t, BackdropData>& GetBackdropData() const {
+    return backdrop_data_;
+  }
 
   /// @brief Return the culling bounds of the current render target, or nullopt
   ///        if there is no coverage.
@@ -282,6 +287,11 @@ class Canvas {
   /// are generated.
   bool EnsureFinalMipmapGeneration() const;
 
+  /// Returns true if the paint is compatible with SDF rendering.
+  ///
+  static bool IsCompatibleWithSDFRendering(const Paint& paint,
+                                           const Matrix& transform = Matrix());
+
  private:
   class BlurShape {
    public:
@@ -381,17 +391,31 @@ class Canvas {
       bool reuse_depth = false,
       std::shared_ptr<Contents> override_contents = nullptr);
 
+  /// @brief  Adds a rendering entity using the UberSDF pipeline
+  ///         to the current render pass.
+  ///
+  /// @param  paint            The paint style to apply.
+  /// @param  params           The SDF parameters for the shape.
+  /// @param  reuse_depth       Whether to reuse the current depth value or
+  ///                          allocate a new depth layer.
+  /// @param  shape_transform  An optional transform applied to the shape
+  ///                          relative to the current canvas transform.
   void AddRenderSDFEntityToCurrentPass(
-      Entity& entity,
-      const Geometry* geom,
       const Paint& paint,
-      std::shared_ptr<ColorSourceContents> contents);
+      UberSDFParameters params,
+      bool reuse_depth = false,
+      const std::optional<Matrix>& shape_transform = std::nullopt);
 
   void AddRenderEntityToCurrentPass(Entity& entity, bool reuse_depth = false);
 
   /// Returns true if this operation is consistent with a DrawShadow-like
   /// operation.
   static bool IsShadowBlurDrawOperation(const Paint& paint);
+
+  bool AttemptDrawLineSDF(const Point& p0,
+                          const Point& p1,
+                          const Paint& paint,
+                          bool reuse_depth);
 
   bool AttemptDrawAntialiasedCircle(const Point& center,
                                     Scalar radius,

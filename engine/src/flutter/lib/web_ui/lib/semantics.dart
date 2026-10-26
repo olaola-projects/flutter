@@ -652,6 +652,9 @@ enum SemanticsRole {
   main,
   navigation,
   region,
+  slider,
+  listBox,
+  option,
 }
 
 // Mirrors engine/src/flutter/lib/ui/semantics.dart
@@ -722,7 +725,7 @@ class SemanticsUpdateBuilder {
     required int platformViewId,
     required int scrollChildren,
     required int scrollIndex,
-    required int? traversalParent,
+    required int traversalParent,
     required double scrollPosition,
     required double scrollExtentMax,
     required double scrollExtentMin,
@@ -738,7 +741,7 @@ class SemanticsUpdateBuilder {
     required List<StringAttribute> decreasedValueAttributes,
     required String hint,
     required List<StringAttribute> hintAttributes,
-    String? tooltip,
+    required String tooltip,
     TextDirection? textDirection,
     required Float64List transform,
     required Float64List hitTestTransform,
